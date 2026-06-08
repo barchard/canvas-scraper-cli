@@ -103,6 +103,15 @@ const flagDef = [
     flags: "-v",
     description: "scrape the Videos (Panopto) page",
   },
+  {
+    type: "confirm",
+    name: "t",
+    message:
+      "Do you want to transcribe downloaded videos? (runs config.json transcribeCommand)",
+    default: false,
+    flags: "-t",
+    description: "transcribe downloaded videos via config.json transcribeCommand",
+  },
 ];
 
 const program = new Command();
@@ -132,6 +141,19 @@ program.action(async (url, options) => {
   // read cookies
   const cookies = readJSON(options.cookies, "cookies");
   process.env.config = JSON.stringify(readJSON("config.json", "config"));
+
+  // opt-in transcription of downloaded videos (via config.json transcribeCommand)
+  if (options.t) {
+    process.env.transcribe = "true";
+    if (!JSON.parse(process.env.config).transcribeCommand) {
+      helpers.print(
+        "WARNING",
+        "TRANSCRIBE",
+        'Transcription enabled (-t) but "transcribeCommand" is empty in config.json. Videos will not be transcribed.',
+        0
+      );
+    }
+  }
 
   console.log(`*** SCRAPING COURSE FROM ${url} ***`);
   console.log(`FLAGS: ${JSON.stringify(options)}`);

@@ -79,12 +79,29 @@ Options:
   -m                       scrape modules (default: false)
   -q                       scrape quizzes (default: false)
   -v                       scrape the Videos (Panopto) page (default: false)
+  -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
   -h, --help               display help for command
 ```
 
-Use any combination of the `a`, `m`, `q`, and `v` flags to choose what to scrape. If none are provided, all of them are scraped.
+Use any combination of the `a`, `m`, `q`, and `v` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` is a separate modifier — it is **not** included in "scrape all".)
 
 The `-v` flag archives the course's **Videos** tab (the Panopto course folder): it launches the Panopto LTI tab while signed in, finds the folder it lands on, and downloads every session as `mp4` via `yt-dlp` into `VIDEOS/`. This requires your Panopto cookies in the cookies file (see [Cookies for Panopto](#cookies-for-panopto-and-other-login-gated-videos)). The nav tab is matched by the label `Videos` by default; if your course names it differently, set `"videosTabLabel"` in `config.json`.
+
+### Transcribing videos
+
+The `-t` flag runs a transcription command on each downloaded video. Set the command in `config.json` as `"transcribeCommand"`; `yt-dlp` runs it once per finished file, replacing `{}` with the video's path (covering playlists/Panopto folders automatically). If `{}` is omitted, the file path is appended.
+
+[MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) has no headless CLI, so the practical macOS options are:
+
+```jsonc
+// Run a MacWhisper Shortcut you created (input file -> Transcribe -> save .txt next to the video):
+"transcribeCommand": "shortcuts run \"Transcribe Video\" -i {}"
+
+// Or just queue each video into the MacWhisper app (you click Transcribe/Export):
+"transcribeCommand": "open -a MacWhisper {}"
+```
+
+Any other transcriber works too — e.g. a headless Whisper CLI: `"transcribeCommand": "whisper {} --model small --output_format txt"`. `-t` is opt-in and is ignored if `transcribeCommand` is empty.
 
 In addition to Canvas-hosted files, the scraper now also captures **externally-hosted links** found in assignment descriptions and module/quiz content:
 - **Files** (PDFs, Office docs, etc.) are downloaded as-is.

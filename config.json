@@ -22,5 +22,6 @@
     "quiz": "#content"
   },
   "videoHosts": [],
-  "videosTabLabel": "Videos"
+  "videosTabLabel": "Videos",
+  "transcribeCommand": ""
 }

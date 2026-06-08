@@ -527,6 +527,19 @@ const exported = {
     const cookieFile = this.getYtDlpCookieFile(cookies);
     if (cookieFile) args.push("--cookies", cookieFile);
 
+    // Optional post-download transcription: run the configured command on each
+    // finished file ({} -> the file path). yt-dlp runs this once per downloaded
+    // video, so playlists/folders are covered automatically.
+    if (process.env.transcribe === "true") {
+      let cmd = "";
+      try {
+        cmd = JSON.parse(process.env.config || "{}").transcribeCommand || "";
+      } catch (e) {
+        // no/invalid config
+      }
+      if (cmd) args.push("--exec", cmd);
+    }
+
     args.push(url);
 
     try {
