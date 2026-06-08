@@ -7,17 +7,24 @@ async function scrapeModule(browser, cookies, dir, sectionName, module) {
 
   const page = await helpers.newPage(browser, cookies, module.url);
   await page.pdf({
-    path: `${dir}/MODULES/${sectionName}/${module.name}/.MODULE.pdf`,
+    path: `${dir}/MODULES/${sectionName}/${module.name}/MODULE.pdf`,
     format: "Letter",
   });
 
+  const moduleDir = `${dir}/MODULES/${sectionName}/${module.name}`;
   let pDownloads = [];
   try {
     pDownloads = await helpers.searchAndDownload(
       page,
       cookies,
-      `${dir}/MODULES/${sectionName}/${module.name}`,
+      moduleDir,
       "span > a"
+    );
+
+    const externalSelector = JSON.parse(process.env.config).externalSelectors
+      ?.module;
+    pDownloads = pDownloads.concat(
+      await helpers.searchAndDownloadExternal(page, cookies, moduleDir, externalSelector)
     );
   } catch (e) {
     helpers.print(

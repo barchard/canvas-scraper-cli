@@ -15,5 +15,11 @@
       "headerSelector": ".ig-header .ig-header-title button",
       "itemSelector": ".ig-row a"
     }
-  }
+  },
+  "externalSelectors": {
+    "assignment": "#assignment_show .description",
+    "module": "#content",
+    "quiz": "#content"
+  },
+  "videoHosts": []
 }

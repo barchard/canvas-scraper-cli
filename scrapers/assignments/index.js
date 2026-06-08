@@ -40,7 +40,7 @@ async function scrapeAssignment(
       await aHelpers.scrapeDescription(
         page,
         cookies,
-        `${ASSIGNMENT_PATH}/.ASSIGNMENT`
+        `${ASSIGNMENT_PATH}/ASSIGNMENT`
       )
     );
   } catch (e) {

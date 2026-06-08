@@ -146,7 +146,7 @@ program.action(async (url, options) => {
     );
     process.exit(1);
   }
-  await page.pdf({ path: `${dir}/.HOMEPAGE.pdf`, format: "Letter" });
+  await page.pdf({ path: `${dir}/HOMEPAGE.pdf`, format: "Letter" });
   page.close();
 
   const toScrape = { a: options.a, m: options.m, q: options.q };

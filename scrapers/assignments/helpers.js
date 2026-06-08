@@ -12,18 +12,27 @@ const exported = {
     // print assignment preview
     fs.mkdirSync(`${dir}`);
     await page.pdf({
-      path: `${dir}/.ASSIGNMENT.pdf`,
+      path: `${dir}/ASSIGNMENT.pdf`,
       format: "Letter",
     });
 
     // gather and download links to files embeded in assignment description
-    return helpers.searchAndDownload(
+    let problematic = await helpers.searchAndDownload(
       page,
       cookies,
       dir,
       "#assignment_show .description a",
       "download?download"
     );
+
+    // gather and download externally-hosted links (documents, YouTube videos)
+    const externalSelector = JSON.parse(process.env.config).externalSelectors
+      ?.assignment;
+    problematic = problematic.concat(
+      await helpers.searchAndDownloadExternal(page, cookies, dir, externalSelector)
+    );
+
+    return problematic;
   },
 
   async scrapeSubmissionDetails(page, cookies, dir) {
@@ -37,7 +46,7 @@ const exported = {
 
     let newPage = await helpers.newPage(page.browser(), cookies, link);
     await newPage.pdf({
-      path: `${dir}/.SUBMISSIONDETAILS.pdf`,
+      path: `${dir}/SUBMISSIONDETAILS.pdf`,
       format: "Letter",
     });
     return true;
@@ -81,7 +90,7 @@ const exported = {
       return comments.innerText;
     });
     if (!comments) return false;
-    await helpers.writeFile(dir, ".COMMENTS.txt", comments);
+    await helpers.writeFile(dir, "COMMENTS.txt", comments);
     return true;
   },
 };

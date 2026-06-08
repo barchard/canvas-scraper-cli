@@ -1,9 +1,18 @@
 import fs from "fs";
 import fetch from "node-fetch";
 import path from "path";
+import os from "os";
 import http from "http";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { Browser, Page } from "puppeteer";
 import { Readable } from "stream";
+
+const execFileAsync = promisify(execFile);
+
+let warnedMissingYtDlp = false;
+// Cached path to the Netscape cookie file generated for yt-dlp (built once).
+let ytDlpCookieFile = null;
 
 const exported = {
   /**
@@ -22,12 +31,40 @@ const exported = {
   },
 
   /**
-   * Sanitizes a string to be used as a filename
+   * Sanitizes a string to be used as a macOS-compatible filename.
+   * Replaces filesystem-illegal characters (including macOS's "/" and ":"),
+   * strips control/leading/trailing junk, and enforces a safe length.
    * @param {string} string string to sanitize
-   * @returns {string} string with invalid characters replaced with "-"
+   * @returns {string} sanitized filename (never empty)
    */
   stripInvalid(string) {
-    return string.replaceAll(/[/\\?%*:|"<>]/g, "-").trim();
+    let name = String(string ?? "")
+      // illegal/unsafe characters -> "-"
+      .replaceAll(/[/\\?%*:|"<>]/g, "-")
+      // control characters
+      .replaceAll(/[\x00-\x1f]/g, "")
+      // collapse runs of whitespace/dashes
+      .replaceAll(/\s+/g, " ")
+      .replaceAll(/-{2,}/g, "-")
+      .trim()
+      // no leading/trailing dots or spaces (avoids hidden/".."/trailing-dot names)
+      .replaceAll(/^[.\s]+|[.\s]+$/g, "");
+
+    if (!name) return "untitled";
+
+    // truncate to a safe byte length, preserving the extension
+    const MAX_BYTES = 200;
+    if (Buffer.byteLength(name, "utf8") > MAX_BYTES) {
+      const ext = path.extname(name);
+      const base = name.slice(0, name.length - ext.length);
+      let truncated = base;
+      while (Buffer.byteLength(truncated + ext, "utf8") > MAX_BYTES) {
+        truncated = truncated.slice(0, -1);
+      }
+      name = (truncated.trim() || "untitled") + ext;
+    }
+
+    return name;
   },
 
   /**
@@ -114,6 +151,331 @@ const exported = {
     );
 
     return await this.downloadFiles(downloads, cookies, dir);
+  },
+
+  /**
+   * Built-in hostnames whose links should be downloaded with yt-dlp (which
+   * natively supports these providers) rather than fetched as plain files.
+   * Extra hosts can be added via the "videoHosts" array in config.json.
+   */
+  defaultVideoHosts: [
+    "youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "panopto.com",
+  ],
+
+  _videoHostsCache: null,
+
+  /**
+   * The full list of video hostnames: the built-in defaults plus any extras
+   * configured in config.json's "videoHosts" array (lowercased, deduped).
+   * @returns {Array<string>}
+   */
+  getVideoHosts() {
+    if (this._videoHostsCache) return this._videoHostsCache;
+    let extra = [];
+    try {
+      const cfg = process.env.config ? JSON.parse(process.env.config) : {};
+      if (Array.isArray(cfg.videoHosts)) {
+        extra = cfg.videoHosts.map((h) => String(h).toLowerCase());
+      }
+    } catch (e) {
+      // ignore malformed config; fall back to defaults
+    }
+    this._videoHostsCache = [...new Set([...this.defaultVideoHosts, ...extra])];
+    return this._videoHostsCache;
+  },
+
+  /**
+   * Whether a hostname matches one of the yt-dlp video providers (exact match
+   * or a subdomain of one).
+   * @param {string} hostname lowercase hostname
+   * @returns {boolean}
+   */
+  isVideoHost(hostname) {
+    return this.getVideoHosts().some(
+      (h) => hostname === h || hostname.endsWith(`.${h}`)
+    );
+  },
+
+  /**
+   * Classifies a video URL as a "playlist" (a Panopto folder, a provider
+   * playlist, etc. — many videos) or a "single" video. Used to decide yt-dlp's
+   * output layout and whether to expand playlists.
+   * @param {string} url
+   * @returns {"playlist"|"single"}
+   */
+  videoUrlKind(url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch (e) {
+      return "single";
+    }
+    const host = u.hostname.toLowerCase();
+    const pathLower = u.pathname.toLowerCase();
+    const params = new Set();
+    for (const k of u.searchParams.keys()) params.add(k.toLowerCase());
+
+    if (host === "panopto.com" || host.endsWith(".panopto.com")) {
+      // Folders/lists -> playlist; Viewer.aspx / Embed.aspx?id=... -> single
+      if (
+        params.has("folderid") ||
+        pathLower.includes("/folders/") ||
+        pathLower.includes("/sessions/list.aspx")
+      ) {
+        return "playlist";
+      }
+      return "single";
+    }
+
+    // Generic (e.g YouTube): a "list" with no single video id is a playlist
+    if (pathLower.includes("/playlist") || (params.has("list") && !params.has("v"))) {
+      return "playlist";
+    }
+    return "single";
+  },
+
+  /**
+   * Builds (once) a Netscape-format cookie file from the scraped cookies so
+   * yt-dlp can authenticate to login-gated providers (e.g Panopto). Returns the
+   * file path, or null if no cookies are available / it could not be written.
+   * @param {Array<object>} cookies puppeteer-style cookies (name, value, domain, ...)
+   * @returns {string|null}
+   */
+  getYtDlpCookieFile(cookies) {
+    if (ytDlpCookieFile !== null) return ytDlpCookieFile || null;
+    if (!cookies || cookies.length === 0) {
+      ytDlpCookieFile = "";
+      return null;
+    }
+    try {
+      const lines = ["# Netscape HTTP Cookie File"];
+      for (const c of cookies) {
+        if (!c.name || !c.domain) continue;
+        const domain = c.domain;
+        const includeSub = domain.startsWith(".") ? "TRUE" : "FALSE";
+        const cookiePath = c.path || "/";
+        const secure = c.secure ? "TRUE" : "FALSE";
+        // 0 = session cookie; yt-dlp accepts these.
+        const expiry = Math.floor(c.expires && c.expires > 0 ? c.expires : 0);
+        lines.push(
+          [domain, includeSub, cookiePath, secure, expiry, c.name, c.value].join(
+            "\t"
+          )
+        );
+      }
+      const file = path.join(os.tmpdir(), `canvas-scraper-cookies-${process.pid}.txt`);
+      fs.writeFileSync(file, lines.join("\n") + "\n");
+      ytDlpCookieFile = file;
+      return file;
+    } catch (e) {
+      this.print("WARNING", "YT-DLP", "Could not build cookie file for yt-dlp", 0, e);
+      ytDlpCookieFile = "";
+      return null;
+    }
+  },
+
+  /**
+   * Guesses a file extension from a content-type header
+   * @param {string|null} contentType content-type header value
+   * @returns {string} extension including the leading dot (e.g ".pdf"), or ""
+   */
+  extFromContentType(contentType) {
+    if (!contentType) return "";
+    const type = contentType.split(";")[0].trim().toLowerCase();
+    const map = {
+      "application/pdf": ".pdf",
+      "application/msword": ".doc",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        ".docx",
+      "application/vnd.ms-powerpoint": ".ppt",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        ".pptx",
+      "application/vnd.ms-excel": ".xls",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        ".xlsx",
+      "application/zip": ".zip",
+      "text/html": ".html",
+      "text/plain": ".txt",
+      "image/jpeg": ".jpg",
+      "image/png": ".png",
+      "image/gif": ".gif",
+    };
+    return map[type] || "";
+  },
+
+  /**
+   * Downloads an externally-hosted file (no Canvas cookies sent). The filename is
+   * derived from the content-disposition header, then the URL pathname, then the
+   * backup name (with an extension guessed from the content-type).
+   * @param {string} url URL to download from
+   * @param {string} dir directory to download to
+   * @param {string} backupName name to use if none can be derived
+   * @returns {Promise<boolean>} whether the file was downloaded successfully
+   */
+  async downloadExternalFile(url, dir, backupName) {
+    const response = await fetch(url, { method: "GET", redirect: "follow" });
+    if (!response.ok) return false;
+
+    let filename = null;
+    const contentDisposition = response.headers.get("content-disposition");
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename="?([^"]+)"?/);
+      if (match) filename = match[1];
+    }
+
+    if (!filename) {
+      try {
+        const pathname = new URL(url).pathname;
+        const base = decodeURIComponent(pathname.split("/").pop() || "");
+        if (base) filename = base;
+      } catch (e) {
+        // fall through to backup name
+      }
+    }
+
+    if (!filename) {
+      filename = backupName + this.extFromContentType(response.headers.get("content-type"));
+    }
+
+    filename = this.stripInvalid(filename);
+
+    const fileStream = fs.createWriteStream(path.join(dir, filename));
+    await response.body.pipe(fileStream);
+    return true;
+  },
+
+  /**
+   * Downloads a video as mp4 using yt-dlp (YouTube, Panopto, etc.). When cookies
+   * are provided, they are passed to yt-dlp so login-gated providers (Panopto)
+   * can authenticate.
+   * @param {string} url video URL (viewer/embed/watch page)
+   * @param {string} dir directory to download to
+   * @param {Array<object>} [cookies] cookies to authenticate with
+   * @returns {Promise<boolean>} whether the video was downloaded successfully
+   */
+  async downloadVideo(url, dir, cookies) {
+    const kind = this.videoUrlKind(url);
+    // Folders/playlists nest their videos under a subfolder named for the
+    // playlist; single sessions land flat in `dir`.
+    const outTemplate =
+      kind === "playlist"
+        ? path.join(dir, "%(playlist_title)s", "%(title)s.%(ext)s")
+        : path.join(dir, "%(title)s.%(ext)s");
+
+    const args = [
+      "--restrict-filenames",
+      "--merge-output-format",
+      "mp4",
+      "-f",
+      "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+      "-o",
+      outTemplate,
+    ];
+
+    // For a single video, don't expand any playlist the URL happens to belong to.
+    if (kind === "single") args.push("--no-playlist");
+
+    const cookieFile = this.getYtDlpCookieFile(cookies);
+    if (cookieFile) args.push("--cookies", cookieFile);
+
+    args.push(url);
+
+    try {
+      await execFileAsync("yt-dlp", args);
+      return true;
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        if (!warnedMissingYtDlp) {
+          warnedMissingYtDlp = true;
+          this.print(
+            "WARNING",
+            "YT-DLP",
+            "yt-dlp is not installed or not on PATH. Skipping video downloads. Install it (e.g 'brew install yt-dlp').",
+            0
+          );
+        }
+        return false;
+      }
+      this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.stderr || e.message);
+      return false;
+    }
+  },
+
+  /**
+   * Finds external links (anchors and iframes) within a content area and downloads
+   * them: video-provider links (YouTube, Panopto, ...) via yt-dlp (mp4), everything
+   * else as a plain file download.
+   * @param {Page} page page to search on
+   * @param {Array<object>} cookies cookies to authenticate video downloads with
+   * @param {string} dir directory to download to
+   * @param {string} contentSelector selector for the content container to scan
+   * @returns {Promise<Array<string>>} array of URLs that could not be downloaded
+   */
+  async searchAndDownloadExternal(page, cookies, dir, contentSelector) {
+    if (!contentSelector) return [];
+
+    const { external, lti } = await page.evaluate((contentSelector) => {
+      const host = location.hostname;
+      const urls = [];
+      document
+        .querySelectorAll(`${contentSelector} a`)
+        .forEach((a) => a.href && urls.push(a.href));
+      document
+        .querySelectorAll(`${contentSelector} iframe`)
+        .forEach((f) => f.src && urls.push(f.src));
+
+      const external = [];
+      const lti = [];
+      for (const u of [...new Set(urls)]) {
+        let url;
+        try {
+          url = new URL(u);
+        } catch (e) {
+          continue;
+        }
+        if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+
+        if (url.hostname !== host) {
+          external.push(u);
+        } else if (url.pathname.includes("/external_tools/")) {
+          // Same-host Canvas LTI launch (e.g Harvard Business Publishing case).
+          lti.push(u);
+        }
+      }
+      return { external, lti };
+    }, contentSelector);
+
+    let problematic = [];
+    for (let i = 0; i < external.length; i++) {
+      const url = external[i];
+      let hostname = "";
+      try {
+        hostname = new URL(url).hostname.toLowerCase();
+      } catch (e) {
+        problematic.push(url);
+        continue;
+      }
+
+      try {
+        const success = this.isVideoHost(hostname)
+          ? await this.downloadVideo(url, dir, cookies)
+          : await this.downloadExternalFile(url, dir, `external_${i}`);
+        if (!success) problematic.push(url);
+      } catch (e) {
+        problematic.push(url);
+      }
+    }
+
+    // LTI external-tool launches (e.g Harvard Business Publishing cases) can't be
+    // auto-downloaded: they require a signed launch to a paywalled third party and
+    // return a launch form, not a file. Surface them so they can be opened/saved
+    // manually (the Canvas URL performs the launch when opened while signed in).
+    for (const url of lti) problematic.push(url);
+
+    return problematic;
   },
 
   /**
@@ -262,7 +624,7 @@ const exported = {
     }
 
     await page.pdf({
-      path: `${dir}/${this.types[type].p.toUpperCase()}/.${this.types[
+      path: `${dir}/${this.types[type].p.toUpperCase()}/${this.types[
         type
       ].p.toUpperCase()}.pdf`,
       format: "Letter",

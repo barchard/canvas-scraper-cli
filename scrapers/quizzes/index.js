@@ -7,18 +7,25 @@ async function scrapeQuiz(browser, cookies, dir, sectionName, quiz) {
 
   const page = await helpers.newPage(browser, cookies, quiz.url);
   await page.pdf({
-    path: `${dir}/QUIZZES/${sectionName}/${quiz.name}/.QUIZ.pdf`,
+    path: `${dir}/QUIZZES/${sectionName}/${quiz.name}/QUIZ.pdf`,
     format: "Letter",
   });
 
+  const quizDir = `${dir}/QUIZZES/${sectionName}/${quiz.name}`;
   let pDownloads = [];
   try {
     pDownloads = await helpers.searchAndDownload(
       page,
       cookies,
-      `${dir}/QUIZZES/${sectionName}/${quiz.name}`,
+      quizDir,
       "a",
       "?download"
+    );
+
+    const externalSelector = JSON.parse(process.env.config).externalSelectors
+      ?.quiz;
+    pDownloads = pDownloads.concat(
+      await helpers.searchAndDownloadExternal(page, cookies, quizDir, externalSelector)
     );
   } catch (e) {
     helpers.print(
