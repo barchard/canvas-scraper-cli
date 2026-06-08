@@ -78,12 +78,18 @@ Options:
   -a                       scrape assignments (default: false)
   -m                       scrape modules (default: false)
   -q                       scrape quizzes (default: false)
+  -v                       scrape the Videos (Panopto) page (default: false)
   -h, --help               display help for command
 ```
 
-Use any combination of the `a`, `m`, and `q` flags to choose what to scrape. If none are provided, all of them are scraped.
+Use any combination of the `a`, `m`, `q`, and `v` flags to choose what to scrape. If none are provided, all of them are scraped.
 
-In addition to Canvas-hosted files, the scraper now also captures **externally-hosted links** found in assignment descriptions and module/quiz content: documents (e.g. case PDFs) are downloaded directly, and videos (YouTube, Panopto) are downloaded as `mp4` via `yt-dlp`.
+The `-v` flag archives the course's **Videos** tab (the Panopto course folder): it launches the Panopto LTI tab while signed in, finds the folder it lands on, and downloads every session as `mp4` via `yt-dlp` into `VIDEOS/`. This requires your Panopto cookies in the cookies file (see [Cookies for Panopto](#cookies-for-panopto-and-other-login-gated-videos)). The nav tab is matched by the label `Videos` by default; if your course names it differently, set `"videosTabLabel"` in `config.json`.
+
+In addition to Canvas-hosted files, the scraper now also captures **externally-hosted links** found in assignment descriptions and module/quiz content:
+- **Files** (PDFs, Office docs, etc.) are downloaded as-is.
+- **Webpages** (e.g. a linked news article) are rendered to a **PDF archive** by the headless browser, named from the page title (e.g. `Journalism That Stands Apart … - The New York Times.pdf`). This is best-effort: paywalled or login-gated pages capture only what's publicly visible, and bot-protected sites may render a blocked page.
+- **Videos** (YouTube, Panopto) are downloaded as `mp4` via `yt-dlp`.
 
 Some course materials are **LTI external-tool launches** rather than direct files — most notably Harvard Business Publishing (HBS) cases, which link through Canvas (e.g. `…/external_tools/retrieve?url=…hbsp.harvard.edu…`). For HBS links the scraper performs the signed launch in the authenticated browser and, if the resulting page offers a **Download PDF** option, submits it and saves the PDF automatically (named from the case, e.g. `What Is Strategy.pdf`). This only works for items your institution has licensed for PDF download — exactly what you'd get by clicking the button yourself. Anything that can't be downloaded (a non-HBS tool, or an HBS item that only offers an online reader/video) is listed at the end of the run under "could not download" so you can open the Canvas URL while signed in and save it manually.
 
@@ -113,6 +119,9 @@ Some course materials are **LTI external-tool launches** rather than direct file
       - {Embedded Files}
       - {External Documents & Videos}
   - QUIZZES.pdf
+- VIDEOS
+  - {Panopto folder name}
+    - {Session recordings as mp4}
 - HOMEPAGE.pdf
 
 ## Video Tutorial

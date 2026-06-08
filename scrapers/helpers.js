@@ -238,6 +238,39 @@ const exported = {
   },
 
   /**
+   * Given any Panopto URL that references a folder (an embedded folder view, an
+   * LTI landing page with a folderID in the query or hash, etc.), returns a
+   * canonical folder URL that yt-dlp's Panopto extractor understands. Returns
+   * null if no folder id can be found.
+   * @param {string} u a Panopto URL
+   * @returns {string|null}
+   */
+  panoptoFolderUrl(u) {
+    try {
+      const url = new URL(u);
+      let folderId =
+        url.searchParams.get("folderID") || url.searchParams.get("folderId");
+      if (!folderId && url.hash) {
+        // decode first so %22 etc. become real separators, then match the id
+        let hash = url.hash;
+        try {
+          hash = decodeURIComponent(url.hash);
+        } catch (e) {
+          // keep raw hash
+        }
+        const m = hash.match(/folder(?:ID)?["':=\s]+([0-9a-fA-F-]{36})/i);
+        if (m) folderId = m[1];
+      }
+      if (folderId) {
+        return `${url.protocol}//${url.host}/Panopto/Pages/Sessions/List.aspx?folderID=${folderId}`;
+      }
+    } catch (e) {
+      // not a parseable URL
+    }
+    return null;
+  },
+
+  /**
    * Builds (once) a Netscape-format cookie file from the scraped cookies so
    * yt-dlp can authenticate to login-gated providers (e.g Panopto). Returns the
    * file path, or null if no cookies are available / it could not be written.
@@ -316,9 +349,27 @@ const exported = {
    * @returns {Promise<boolean>} whether the file was downloaded successfully
    */
   async downloadExternalFile(url, dir, backupName) {
-    const response = await fetch(url, { method: "GET", redirect: "follow" });
+    let response;
+    try {
+      response = await fetch(url, { method: "GET", redirect: "follow" });
+    } catch (e) {
+      return false;
+    }
     if (!response.ok) return false;
+    return this.writeResponseToFile(url, response, dir, backupName);
+  },
 
+  /**
+   * Writes an already-fetched response body to a file, deriving the filename from
+   * the content-disposition header, then the URL pathname, then the backup name
+   * (with an extension guessed from the content-type).
+   * @param {string} url the URL the response came from
+   * @param {object} response a node-fetch response
+   * @param {string} dir directory to write to
+   * @param {string} backupName name to use if none can be derived
+   * @returns {Promise<boolean>}
+   */
+  async writeResponseToFile(url, response, dir, backupName) {
     let filename = null;
     const contentDisposition = response.headers.get("content-disposition");
     if (contentDisposition) {
@@ -337,14 +388,109 @@ const exported = {
     }
 
     if (!filename) {
-      filename = backupName + this.extFromContentType(response.headers.get("content-type"));
+      filename =
+        backupName + this.extFromContentType(response.headers.get("content-type"));
     }
 
     filename = this.stripInvalid(filename);
 
-    const fileStream = fs.createWriteStream(path.join(dir, filename));
-    await response.body.pipe(fileStream);
+    await new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(path.join(dir, filename));
+      response.body.on("error", reject);
+      fileStream.on("error", reject);
+      fileStream.on("finish", resolve);
+      response.body.pipe(fileStream);
+    });
     return true;
+  },
+
+  /**
+   * Downloads an external resource. If it's a webpage (HTML) we render an archival
+   * PDF of it with the headless browser; otherwise it's saved as the file it is.
+   * @param {Browser} browser puppeteer browser
+   * @param {string} url URL to download from
+   * @param {string} dir directory to save to
+   * @param {number} index index used to build a fallback filename
+   * @returns {Promise<boolean>} whether something was saved
+   */
+  async downloadExternalResource(browser, url, dir, index) {
+    let response;
+    try {
+      response = await fetch(url, { method: "GET", redirect: "follow" });
+    } catch (e) {
+      return false;
+    }
+    if (!response.ok) return false;
+
+    const ct = (response.headers.get("content-type") || "").toLowerCase();
+    const cd = response.headers.get("content-disposition") || "";
+    const isHtml =
+      ct.includes("text/html") || ct.includes("application/xhtml+xml");
+
+    if (isHtml && !/attachment/i.test(cd)) {
+      // A webpage: discard the fetched HTML and re-render it with the browser so
+      // the PDF includes the page's styling, images, and scripted content.
+      try {
+        response.body.destroy();
+      } catch (e) {
+        // ignore
+      }
+      return this.archiveWebpageAsPdf(browser, url, dir, `external_${index}`);
+    }
+
+    return this.writeResponseToFile(url, response, dir, `external_${index}`);
+  },
+
+  /**
+   * Renders an external webpage to a PDF "archive" using the headless browser.
+   * Best-effort: paywalled or login-gated pages capture only what is publicly
+   * visible, and bot-protected sites may render a blocked page.
+   * @param {Browser} browser puppeteer browser
+   * @param {string} url webpage URL
+   * @param {string} dir directory to save to
+   * @param {string} backupName fallback filename (no extension)
+   * @returns {Promise<boolean>}
+   */
+  async archiveWebpageAsPdf(browser, url, dir, backupName) {
+    let page;
+    try {
+      page = await browser.newPage();
+      await page.setViewport({ width: 1280, height: 900 });
+      // Archive what a reader sees (screen styles), not the print stylesheet.
+      await page.emulateMediaType("screen").catch(() => {});
+      // Render whatever loads; don't fail the whole thing on a slow idle timeout.
+      await page
+        .goto(url, { waitUntil: "networkidle2", timeout: 30000 })
+        .catch(() => {});
+
+      let name = "";
+      try {
+        name = ((await page.title()) || "").trim();
+      } catch (e) {
+        // ignore
+      }
+      if (!name) {
+        try {
+          const u = new URL(url);
+          name = (u.hostname + u.pathname).replace(/\/+$/, "").replace(/\//g, "-");
+        } catch (e) {
+          name = backupName;
+        }
+      }
+      name = this.stripInvalid(name || backupName);
+      if (!/\.pdf$/i.test(name)) name += ".pdf";
+
+      await page.pdf({
+        path: path.join(dir, name),
+        format: "Letter",
+        printBackground: true,
+      });
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      if (page) await page.close().catch(() => {});
+    }
   },
 
   /**
@@ -580,7 +726,7 @@ const exported = {
       try {
         const success = this.isVideoHost(hostname)
           ? await this.downloadVideo(url, dir, cookies)
-          : await this.downloadExternalFile(url, dir, `external_${i}`);
+          : await this.downloadExternalResource(page.browser(), url, dir, i);
         if (!success) problematic.push(url);
       } catch (e) {
         problematic.push(url);
