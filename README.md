@@ -85,7 +85,7 @@ Use any combination of the `a`, `m`, and `q` flags to choose what to scrape. If 
 
 In addition to Canvas-hosted files, the scraper now also captures **externally-hosted links** found in assignment descriptions and module/quiz content: documents (e.g. case PDFs) are downloaded directly, and videos (YouTube, Panopto) are downloaded as `mp4` via `yt-dlp`.
 
-Some course materials are **LTI external-tool launches** rather than direct files — most notably Harvard Business Publishing cases, which link through Canvas (e.g. `…/external_tools/retrieve?url=…hbsp.harvard.edu…`). These can't be downloaded automatically: opening them performs a signed launch into a paywalled third-party site that returns a viewer, not a file. The scraper detects these links and lists them at the end of the run (under "could not download") so you can open each Canvas URL while signed in and save the case manually.
+Some course materials are **LTI external-tool launches** rather than direct files — most notably Harvard Business Publishing (HBS) cases, which link through Canvas (e.g. `…/external_tools/retrieve?url=…hbsp.harvard.edu…`). For HBS links the scraper performs the signed launch in the authenticated browser and, if the resulting page offers a **Download PDF** option, submits it and saves the PDF automatically (named from the case, e.g. `What Is Strategy.pdf`). This only works for items your institution has licensed for PDF download — exactly what you'd get by clicking the button yourself. Anything that can't be downloaded (a non-HBS tool, or an HBS item that only offers an online reader/video) is listed at the end of the run under "could not download" so you can open the Canvas URL while signed in and save it manually.
 
 ## Download File Structure
 

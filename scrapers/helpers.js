@@ -405,6 +405,124 @@ const exported = {
   },
 
   /**
+   * Attempts to download a PDF from a Canvas LTI external-tool launch that points
+   * at Harvard Business Publishing. Navigating the Canvas `retrieve` URL with the
+   * authenticated browser performs the signed LTI launch and lands on the HBS
+   * content-launch page, which contains a "Download PDF" form (POST, same-origin,
+   * authorized by the session the launch established). We submit that form from
+   * within the page and save the returned bytes.
+   * @param {Browser} browser puppeteer browser
+   * @param {Array<object>} cookies cookies to authenticate with
+   * @param {string} retrieveUrl the Canvas `…/external_tools/retrieve?url=…` link
+   * @param {string} dir directory to save the PDF to
+   * @returns {Promise<{handled: boolean, ok?: boolean}>} handled=false means this
+   *   wasn't an HBS launch (caller should treat it as un-downloadable)
+   */
+  async downloadLtiPdf(browser, cookies, retrieveUrl, dir) {
+    let targetParam = null;
+    try {
+      targetParam = new URL(retrieveUrl).searchParams.get("url");
+    } catch (e) {
+      // not a parseable URL; fall through to the ref check below
+    }
+    // Only handle Harvard Business Publishing launches.
+    if (!/hbsp\.harvard\.edu/i.test(`${targetParam || ""} ${retrieveUrl}`)) {
+      return { handled: false };
+    }
+
+    let page;
+    try {
+      page = await this.newPage(browser, cookies, retrieveUrl);
+      // The launch auto-submits a signed form; give it a moment to settle.
+      await page
+        .waitForNetworkIdle({ idleTime: 1000, timeout: 15000 })
+        .catch(() => {});
+
+      // The HBS page may be the top frame or an embedded tool iframe.
+      for (const frame of page.frames()) {
+        let result = null;
+        try {
+          result = await frame.evaluate(async () => {
+            const form =
+              document.querySelector("form#pdfLaunch") ||
+              Array.from(document.querySelectorAll("form")).find((f) =>
+                /\/pdf-downloads(\/|\?|$)/.test(f.action)
+              );
+            if (!form) return null;
+
+            const params = new URLSearchParams();
+            for (const el of form.elements) {
+              if (el.name) params.append(el.name, el.value);
+            }
+            const availabilityId =
+              (form.querySelector('[name="availabilityId"]') || {}).value || "";
+
+            const res = await fetch(form.action, {
+              method: "POST",
+              body: params,
+              credentials: "include",
+              redirect: "follow",
+            });
+            if (!res.ok) return { ok: false };
+            const ct = res.headers.get("content-type") || "";
+            const cd = res.headers.get("content-disposition") || "";
+            if (!/pdf|octet-stream/i.test(ct) && !/\.pdf/i.test(cd)) {
+              return { ok: false };
+            }
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            let binary = "";
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {
+              binary += String.fromCharCode.apply(
+                null,
+                bytes.subarray(i, i + chunk)
+              );
+            }
+            return {
+              ok: true,
+              base64: btoa(binary),
+              contentDisposition: cd,
+              availabilityId,
+            };
+          });
+        } catch (e) {
+          result = null;
+        }
+
+        if (result === null) continue; // no PDF form in this frame
+        if (!result.ok) return { handled: true, ok: false };
+
+        let filename = null;
+        const m =
+          result.contentDisposition &&
+          result.contentDisposition.match(
+            /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i
+          );
+        if (m) {
+          try {
+            filename = decodeURIComponent(m[1]);
+          } catch (e) {
+            filename = m[1];
+          }
+        }
+        if (!filename) filename = (result.availabilityId || "document") + ".pdf";
+        if (!/\.pdf$/i.test(filename)) filename += ".pdf";
+
+        const buf = Buffer.from(result.base64, "base64");
+        fs.writeFileSync(path.join(dir, this.stripInvalid(filename)), buf);
+        return { handled: true, ok: true };
+      }
+
+      // HBS launch, but no downloadable PDF (e.g video / online reader only).
+      return { handled: true, ok: false };
+    } catch (e) {
+      return { handled: true, ok: false };
+    } finally {
+      if (page) await page.close().catch(() => {});
+    }
+  },
+
+  /**
    * Finds external links (anchors and iframes) within a content area and downloads
    * them: video-provider links (YouTube, Panopto, ...) via yt-dlp (mp4), everything
    * else as a plain file download.
@@ -469,11 +587,21 @@ const exported = {
       }
     }
 
-    // LTI external-tool launches (e.g Harvard Business Publishing cases) can't be
-    // auto-downloaded: they require a signed launch to a paywalled third party and
-    // return a launch form, not a file. Surface them so they can be opened/saved
-    // manually (the Canvas URL performs the launch when opened while signed in).
-    for (const url of lti) problematic.push(url);
+    // LTI external-tool launches (e.g Harvard Business Publishing cases). For HBS
+    // we perform the signed launch in the authenticated browser and submit the
+    // "Download PDF" form to fetch the file. Anything we can't download (a
+    // non-HBS tool, or an HBS item with no PDF) is surfaced so it can be opened
+    // and saved manually (the Canvas URL performs the launch while signed in).
+    for (const url of lti) {
+      let ok = false;
+      try {
+        const r = await this.downloadLtiPdf(page.browser(), cookies, url, dir);
+        ok = !!(r && r.handled && r.ok);
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok) problematic.push(url);
+    }
 
     return problematic;
   },
