@@ -154,6 +154,110 @@ const exported = {
   },
 
   /**
+   * Lists the courses the user is enrolled in. Tries the Canvas REST API first
+   * (session-cookie auth, with pagination); if that returns nothing (e.g the
+   * institution blocks cookie-auth API access), falls back to scraping the
+   * /courses HTML page with the browser. Date-restricted courses are skipped.
+   * @param {string} domain e.g "https://canvas.mit.edu"
+   * @param {Array<object>} cookies session cookies
+   * @param {Browser} [browser] puppeteer browser (needed for the HTML fallback)
+   * @returns {Promise<Array<{id: (string|number), name: string}>>}
+   */
+  async listCourses(domain, cookies, browser) {
+    const cookieHeader = cookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+
+    const courses = [];
+    const seen = new Set();
+    const add = (id, name) => {
+      if (id === undefined || id === null) return;
+      const key = String(id);
+      if (seen.has(key)) return;
+      seen.add(key);
+      courses.push({ id, name: name || `course-${id}` });
+    };
+
+    // 1. Preferred: the Canvas REST API, paginated. No enrollment_state filter so
+    //    past/completed courses are included too (date-restricted ones are skipped
+    //    below since they can't be opened anyway).
+    let url = `${domain}/api/v1/courses?per_page=100`;
+    let guard = 0;
+    while (url && guard++ < 50) {
+      let response;
+      try {
+        response = await fetch(url, {
+          headers: { Cookie: cookieHeader, Accept: "application/json" },
+        });
+      } catch (e) {
+        break;
+      }
+      if (!response.ok) break;
+
+      let pageItems;
+      try {
+        pageItems = await response.json();
+      } catch (e) {
+        break;
+      }
+      if (Array.isArray(pageItems)) {
+        for (const c of pageItems) {
+          if (!c || c.access_restricted_by_date) continue;
+          add(c.id, c.name);
+        }
+      }
+
+      // follow the rel="next" link header for pagination
+      url = null;
+      const link = response.headers.get("link");
+      if (link) {
+        for (const part of link.split(",")) {
+          if (/rel="next"/.test(part)) {
+            const m = part.match(/<([^>]+)>/);
+            if (m) url = m[1];
+            break;
+          }
+        }
+      }
+    }
+
+    if (courses.length || !browser) return courses;
+
+    // 2. Fallback: scrape the /courses page (anchors to /courses/<numeric id>).
+    this.print(
+      "NOTE",
+      "COURSES",
+      "Course API returned nothing; falling back to the /courses page...",
+      0
+    );
+    let page;
+    try {
+      page = await this.newPage(browser, cookies, `${domain}/courses`);
+      if (page.status === 200) {
+        const found = await page.evaluate(() => {
+          const out = [];
+          document.querySelectorAll('a[href*="/courses/"]').forEach((a) => {
+            const href = a.getAttribute("href") || "";
+            const m = href.match(/\/courses\/(\d+)(?:$|[/?#])/);
+            if (!m) return;
+            const name = (a.textContent || "").trim();
+            if (!name) return;
+            out.push({ id: m[1], name });
+          });
+          return out;
+        });
+        for (const c of found) add(c.id, c.name);
+      }
+    } catch (e) {
+      // ignore; return whatever we have
+    } finally {
+      if (page) await page.close().catch(() => {});
+    }
+
+    return courses;
+  },
+
+  /**
    * Built-in hostnames whose links should be downloaded with yt-dlp (which
    * natively supports these providers) rather than fetched as plain files.
    * Extra hosts can be added via the "videoHosts" array in config.json.

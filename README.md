@@ -70,7 +70,7 @@ Usage: canvas-scraper [options] <url>
 Scrape data from a canvas course
 
 Arguments:
-  url                      Course Homepage URL (e.g. https://<school_domain>/courses/<course_id>)
+  url                      Course URL (https://<school_domain>/courses/<course_id>), or a bare https://<school_domain> to scrape all your courses
 
 Options:
   -o, --output <dir_name>  output directory name (default: "courses/course")
@@ -84,6 +84,16 @@ Options:
 ```
 
 Use any combination of the `a`, `m`, `q`, and `v` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` is a separate modifier — it is **not** included in "scrape all".)
+
+### Scraping all your courses
+
+Pass a bare domain (no `/courses/<id>`) to scrape **every course you're enrolled in**:
+
+```
+node index.js -o courses https://<school_domain>
+```
+
+The scraper queries the Canvas API (`/api/v1/courses`, using your cookies) for all your courses — current **and** past/completed enrollments — and scrapes each one into its own subfolder of the output directory, named `<Course Name> (<id>)`. (Courses you can no longer open, e.g. those date-restricted after a term ends, are skipped.) If your institution blocks cookie-authenticated API access, it automatically falls back to scraping the `/courses` page instead. The same flags apply to every course; a course that fails (e.g. an inaccessible homepage) is logged and skipped without stopping the rest. Give a full course URL to scrape just that one course (output goes straight into the output directory, as before).
 
 The `-v` flag archives the course's **Videos** tab (the Panopto course folder): it launches the Panopto LTI tab while signed in, finds the folder it lands on, and downloads every session as `mp4` via `yt-dlp` into `VIDEOS/`. This requires your Panopto cookies in the cookies file (see [Cookies for Panopto](#cookies-for-panopto-and-other-login-gated-videos)). The nav tab is matched by the label `Videos` by default; if your course names it differently, set `"videosTabLabel"` in `config.json`.
 
@@ -102,6 +112,59 @@ The `-t` flag runs a transcription command on each downloaded video. Set the com
 ```
 
 Any other transcriber works too — e.g. a headless Whisper CLI: `"transcribeCommand": "whisper {} --model small --output_format txt"`. `-t` is opt-in and is ignored if `transcribeCommand` is empty.
+
+#### Whisper on Windows (pure binary via Scoop)
+
+On Windows you can transcribe with **no Python** using Purfview's standalone [Faster-Whisper-XXL](https://github.com/Purfview/whisper-standalone-win). There is no official Scoop bucket for it, so this repo ships a manifest (`bucket/faster-whisper-xxl.json`) that installs the official release binary. In PowerShell:
+
+```powershell
+# 1. Install Scoop (skip if you already have it)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+
+# 2a. Install directly from the bundled manifest (adds a `whisper-faster` command):
+scoop install .\bucket\faster-whisper-xxl.json
+
+# 2b. ...or add this repo as a Scoop bucket and install by name:
+#     scoop bucket add canvas-scraper https://github.com/<you>/canvas-scraper-cli
+#     scoop install faster-whisper-xxl
+
+# 3. Verify
+whisper-faster --help
+```
+
+Then point `transcribeCommand` in `config.json` at the `whisper-faster` shim, sending transcripts to your `VIDEOS` folder:
+
+```jsonc
+"transcribeCommand": "whisper-faster {} --model small --language English --output_format txt --output_dir courses\\VIDEOS"
+```
+
+`yt-dlp` replaces `{}` with each video's path. Notes:
+- `--output_dir` is where the `.txt`/`.srt` files are written (default: the current directory). Set it to wherever you want the transcripts; match your `-o` output path.
+- Pick a model by speed/accuracy: `tiny` / `base` (fast, lower quality) → `small` / `medium` → `large-v3` (slowest, best). The standalone runs on CPU and is much faster with an NVIDIA GPU.
+- Scoop extracts `.7z`, so the manifest installs a 7-Zip dependency; the first install prints a "No hash" warning (the manifest fills the hash on `scoop update`). If install can't find the exe, the archive layout changed across releases — drop `"extract_dir"` from the manifest.
+- Run the scrape with `-t`, e.g. `node index.js -v -t https://<school_domain>/courses/<course_id>`.
+
+#### Whisper on macOS (via Homebrew)
+
+If you'd rather not use the MacWhisper GUI, install a headless Whisper with [Homebrew](https://brew.sh/). The simplest is OpenAI's Whisper, which transcribes the downloaded `.mp4` files directly:
+
+```sh
+brew install openai-whisper ffmpeg
+whisper --help
+```
+
+Then set `transcribeCommand` in `config.json` (sending transcripts to your `VIDEOS` folder):
+
+```jsonc
+"transcribeCommand": "whisper {} --model small --language en --output_format txt --output_dir courses/VIDEOS"
+```
+
+Faster, native alternatives (both Apple-Silicon-accelerated) are also in Homebrew:
+- **`brew install whisper-cpp`** — [whisper.cpp](https://github.com/ggml-org/whisper.cpp)'s `whisper-cli`. It's much faster but needs a downloaded GGML model (`.bin`) and 16 kHz WAV input, so you'd convert with `ffmpeg` first inside the command.
+- **`brew install whisperkit-cli`** — Apple's CoreML-based `whisperkit-cli`.
+
+See the model/speed notes above; on Apple Silicon even `medium`/`large-v3` are practical with `whisper-cpp`/`whisperkit-cli`.
 
 In addition to Canvas-hosted files, the scraper now also captures **externally-hosted links** found in assignment descriptions and module/quiz content:
 - **Files** (PDFs, Office docs, etc.) are downloaded as-is.

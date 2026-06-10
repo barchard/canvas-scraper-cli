@@ -1,0 +1,37 @@
+{
+  "version": "r245.4",
+  "description": "Faster-Whisper-XXL — standalone (no-Python) Whisper CLI by Purfview. Used by canvas-scraper-cli for video transcription (-t).",
+  "homepage": "https://github.com/Purfview/whisper-standalone-win",
+  "license": {
+    "identifier": "Freeware",
+    "url": "https://github.com/Purfview/whisper-standalone-win/blob/main/README.md"
+  },
+  "notes": [
+    "Installs the `whisper-faster` command. Set config.json \"transcribeCommand\" to:",
+    "  whisper-faster {} --model small --language English --output_format txt --output_dir courses\\VIDEOS"
+  ],
+  "depends": "7zip",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Purfview/whisper-standalone-win/releases/download/Faster-Whisper-XXL/Faster-Whisper-XXL_r245.4_windows.7z",
+      "extract_dir": "Faster-Whisper-XXL"
+    }
+  },
+  "bin": [
+    [
+      "faster-whisper-xxl.exe",
+      "whisper-faster"
+    ]
+  ],
+  "checkver": {
+    "url": "https://github.com/Purfview/whisper-standalone-win/releases/expanded_assets/Faster-Whisper-XXL",
+    "regex": "Faster-Whisper-XXL_(r[\\d.]+)_windows\\.7z"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Purfview/whisper-standalone-win/releases/download/Faster-Whisper-XXL/Faster-Whisper-XXL_$version_windows.7z"
+      }
+    }
+  }
+}

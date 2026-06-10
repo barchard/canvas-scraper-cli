@@ -7,20 +7,55 @@ import inquirer from "inquirer";
 import helpers from "./scrapers/helpers.js";
 import scrapers from "./scrapers/index.js";
 
-function parseUrl(url) {
-  const regex = /^https:\/\/([^/]+)\/courses\/([^/]+)(\/.*)?$/;
-  const match = url.match(regex);
-  if (!match) {
+/**
+ * Parses the target URL into a Canvas domain and (optional) course id.
+ * - "https://<domain>"                    -> all of the user's courses
+ * - "https://<domain>/courses/<course_id>" -> a single course
+ */
+function parseTarget(url) {
+  let m = url.match(/^https:\/\/([^/]+)\/?$/);
+  if (m) return { domain: `https://${m[1]}`, courseId: null };
+
+  m = url.match(/^https:\/\/([^/]+)\/courses\/([^/?#]+)/);
+  if (m) return { domain: `https://${m[1]}`, courseId: m[2] };
+
+  helpers.print(
+    "ERROR",
+    "URL",
+    "Invalid URL. Use 'https://<school_domain>' for all your courses, or 'https://<school_domain>/courses/<course_id>' for a single course. Exiting...",
+    0
+  );
+  process.exit(1);
+}
+
+/**
+ * Scrapes one course into `courseDir` (homepage PDF + the selected sections).
+ */
+async function scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape) {
+  console.log(`*** SCRAPING COURSE FROM ${courseUrl} ***`);
+  fs.mkdirSync(courseDir, { recursive: true });
+
+  const page = await helpers.newPage(browser, cookies, courseUrl);
+  if (page.status !== 200) {
     helpers.print(
       "ERROR",
-      "URL",
-      "Invalid URL. Please follow the 'https://<school_domain>/courses/<course_id>' format. Exiting...",
-      0
+      "HOMEPAGE",
+      `Could not load homepage for ${courseUrl}. Skipping...`,
+      0,
+      http.STATUS_CODES[page.status]
     );
-    process.exit(1);
+    await page.close().catch(() => {});
+    return;
   }
+  await page.pdf({ path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
+  await page.close().catch(() => {});
 
-  return `https://${match[1]}/courses/${match[2]}`;
+  if (toScrape.a) await scrapers.scrapeAssignments(browser, cookies, courseUrl, courseDir);
+  if (toScrape.m) await scrapers.scrapeModules(browser, cookies, courseUrl, courseDir);
+  if (toScrape.q) await scrapers.scrapeQuizzes(browser, cookies, courseUrl, courseDir);
+  if (toScrape.v) await scrapers.scrapeVideos(browser, cookies, courseUrl, courseDir);
+
+  console.log(`*** FINISHED SCRAPING ${courseUrl} ***`);
 }
 
 function readJSON(path, varName) {
@@ -37,12 +72,12 @@ const argDef = [
     type: "input",
     name: "[url]",
     message:
-      "Please enter the Course Homepage URL (e.g. https://<school_domain>/courses/<course_id>):",
+      "Enter a Course URL (https://<school_domain>/courses/<course_id>) or just the domain (https://<school_domain>) to scrape all your courses:",
     validate: (input) =>
-      /^https:\/\/[^/]+\/courses\/[^/]+$/.test(input) ||
-      "Invalid URL format. The URL should match the pattern https://<school_domain>/courses/<course_id>",
+      /^https:\/\/[^/]+(\/courses\/[^/]+)?\/?$/.test(input) ||
+      "Invalid URL. Use https://<school_domain> (all courses) or https://<school_domain>/courses/<course_id> (one course).",
     description:
-      "Course Homepage URL (e.g. https://<school_domain>/courses/<course_id>)",
+      "Course URL, or a bare https://<school_domain> to scrape all your courses",
   },
 ];
 
@@ -136,8 +171,8 @@ program.action(async (url, options) => {
     Object.assign(options, answers);
   }
 
-  // url parsing
-  url = parseUrl(url);
+  // url parsing -> domain + optional course id
+  const { domain, courseId } = parseTarget(url);
   // read cookies
   const cookies = readJSON(options.cookies, "cookies");
   process.env.config = JSON.stringify(readJSON("config.json", "config"));
@@ -155,42 +190,68 @@ program.action(async (url, options) => {
     }
   }
 
-  console.log(`*** SCRAPING COURSE FROM ${url} ***`);
   console.log(`FLAGS: ${JSON.stringify(options)}`);
 
-  // create output directory
+  // create (fresh) output directory
   const dir = options.output;
-  if (fs.existsSync(dir)) fs.rmSync(dir, { directory: true, recursive: true });
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
 
-  // scrape course
-  const browser = await puppeteer.launch({ headless: "new" });
-  const page = await helpers.newPage(browser, cookies, url);
-  if (page.status !== 200) {
-    helpers.print(
-      "ERROR",
-      "HOMEPAGE",
-      "Could not load homepage. Exiting...",
-      0,
-      http.STATUS_CODES[page.status]
-    );
-    process.exit(1);
-  }
-  await page.pdf({ path: `${dir}/HOMEPAGE.pdf`, format: "Letter" });
-  page.close();
-
+  // figure out what to scrape (t is a separate modifier, handled above)
   const toScrape = { a: options.a, m: options.m, q: options.q, v: options.v };
   if (Object.values(toScrape).every((v) => !v)) {
     helpers.print("NOTE", "FLAGS", "No flags set. Scraping all...", 0);
     for (const key in toScrape) toScrape[key] = true;
   }
-  if (toScrape.a) await scrapers.scrapeAssignments(browser, cookies, url, dir);
-  if (toScrape.m) await scrapers.scrapeModules(browser, cookies, url, dir);
-  if (toScrape.q) await scrapers.scrapeQuizzes(browser, cookies, url, dir);
-  if (toScrape.v) await scrapers.scrapeVideos(browser, cookies, url, dir);
+
+  const browser = await puppeteer.launch({ headless: "new" });
+
+  if (courseId) {
+    // single course -> output straight into `dir`
+    await scrapeCourse(browser, cookies, `${domain}/courses/${courseId}`, dir, toScrape);
+  } else {
+    // bare domain -> every course, each into its own subfolder of `dir`
+    helpers.print(
+      "NOTE",
+      "COURSES",
+      `No course id in URL — scraping all your courses on ${domain}...`,
+      0
+    );
+    const courses = await helpers.listCourses(domain, cookies, browser);
+    if (!courses.length) {
+      helpers.print(
+        "WARNING",
+        "COURSES",
+        "No courses found. Check that your cookies are valid and you have active enrollments.",
+        0
+      );
+    } else {
+      helpers.print("NOTE", "COURSES", `Found ${courses.length} course(s).`, 0);
+      for (const c of courses) {
+        const courseDir = `${dir}/${helpers.stripInvalid(`${c.name} (${c.id})`)}`;
+        try {
+          await scrapeCourse(
+            browser,
+            cookies,
+            `${domain}/courses/${c.id}`,
+            courseDir,
+            toScrape
+          );
+        } catch (e) {
+          helpers.print(
+            "ERROR",
+            "COURSE",
+            `Could not scrape ${c.name} (${c.id})`,
+            0,
+            e
+          );
+        }
+      }
+    }
+  }
 
   browser.close();
-  console.log(`*** FINISHED SCRAPING ${url} ***`);
+  console.log("*** DONE ***");
 });
 
 program.parse();
