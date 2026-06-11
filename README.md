@@ -8,6 +8,10 @@ Canvas-Scraper uses [Puppeteer](https://pptr.dev/), a headless browser, to navig
 
 To download embedded videos (saved as `mp4`), Canvas-Scraper shells out to [yt-dlp](https://github.com/yt-dlp/yt-dlp), which must be installed and available on your `PATH` (e.g. `brew install yt-dlp` on macOS). It handles [YouTube](https://www.youtube.com/) and [Panopto](https://www.panopto.com/) links. If `yt-dlp` is not installed, video links are skipped (with a warning) and the rest of the scrape continues normally.
 
+For **YouTube** links, recent `yt-dlp` versions need a JavaScript runtime — without one you'll see "No supported JavaScript runtime could be found" and some formats may be missing or fail. Install [Deno](https://deno.com/) and `yt-dlp` will pick it up automatically: `brew install deno` (macOS) or `scoop install deno` (Windows). See the [yt-dlp EJS wiki](https://github.com/yt-dlp/yt-dlp/wiki/EJS) for details.
+
+**Windows path length:** course/module folders can nest deeply; the scraper passes `yt-dlp` an absolute output path so it can use Windows extended-length paths and avoid the 260-char `MAX_PATH` limit. If you still hit `unable to open for writing … No such file or directory`, either [enable Win32 long paths](https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation) (`LongPathsEnabled`) or use a short output directory near the drive root, e.g. `-o D:\c`.
+
 Panopto videos are often behind a login. So that `yt-dlp` can authenticate, the scraper converts your cookies file into a cookie file it passes to `yt-dlp`. For login-gated Panopto sites (e.g. `*.hosted.panopto.com`), make sure your cookies file also includes the cookies for the Panopto domain (export them the same way you export your Canvas cookies, while signed into Panopto).
 
 A link to a Panopto **folder** (e.g. `…/Pages/Sessions/List.aspx?folderID=…`) is downloaded as a playlist — every session in it is saved as `mp4` into a subfolder named after the folder. A link to a single **session** (`Viewer.aspx`/`Embed.aspx?id=…`) downloads just that one video.

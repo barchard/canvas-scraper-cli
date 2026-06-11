@@ -608,12 +608,16 @@ const exported = {
    */
   async downloadVideo(url, dir, cookies) {
     const kind = this.videoUrlKind(url);
+    // Use an absolute output path: on Windows yt-dlp only applies extended-length
+    // (\\?\) path handling to absolute paths, so a relative -o would hit the
+    // 260-char MAX_PATH limit on deep course/module folders.
+    const absDir = path.resolve(dir);
     // Folders/playlists nest their videos under a subfolder named for the
     // playlist; single sessions land flat in `dir`.
     const outTemplate =
       kind === "playlist"
-        ? path.join(dir, "%(playlist_title)s", "%(title)s.%(ext)s")
-        : path.join(dir, "%(title)s.%(ext)s");
+        ? path.join(absDir, "%(playlist_title)s", "%(title)s.%(ext)s")
+        : path.join(absDir, "%(title)s.%(ext)s");
 
     const args = [
       "--restrict-filenames",
