@@ -37,7 +37,7 @@ async function scrapeModule(browser, cookies, dir, sectionName, module) {
   }
 
   helpers.print("NOTE", `MODULE '${module.name}'`, `DONE SCRAPING`, 1);
-  page.close();
+  await page.close().catch(() => {});
   return pDownloads;
 }
 

@@ -80,7 +80,7 @@ async function scrapeAssignment(
   }
 
   helpers.print("NOTE", `ASSIGNMENT '${assignment.name}'`, `DONE SCRAPING`, 1);
-  page.close();
+  await page.close().catch(() => {});
   return problematic;
 }
 

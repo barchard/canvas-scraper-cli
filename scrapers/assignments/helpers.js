@@ -45,10 +45,14 @@ const exported = {
     if (!link) return false;
 
     let newPage = await helpers.newPage(page.browser(), cookies, link);
-    await newPage.pdf({
-      path: `${dir}/SUBMISSIONDETAILS.pdf`,
-      format: "Letter",
-    });
+    try {
+      await newPage.pdf({
+        path: `${dir}/SUBMISSIONDETAILS.pdf`,
+        format: "Letter",
+      });
+    } finally {
+      await newPage.close().catch(() => {});
+    }
     return true;
   },
 

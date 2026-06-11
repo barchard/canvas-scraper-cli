@@ -1086,7 +1086,7 @@ const exported = {
       );
     }
 
-    page.close();
+    await page.close().catch(() => {});
   },
 
   /**

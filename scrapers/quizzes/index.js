@@ -38,7 +38,7 @@ async function scrapeQuiz(browser, cookies, dir, sectionName, quiz) {
   }
 
   helpers.print("NOTE", `QUIZ '${quiz.name}'`, `DONE SCRAPING`, 1);
-  page.close();
+  await page.close().catch(() => {});
   return pDownloads;
 }
 
