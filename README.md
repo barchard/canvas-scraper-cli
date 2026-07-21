@@ -83,11 +83,12 @@ Options:
   -m                       scrape modules (default: false)
   -q                       scrape quizzes (default: false)
   -v                       scrape the Videos (Panopto) page (default: false)
+  -s                       scrape the Study.Net Materials page (default: false)
   -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
   -h, --help               display help for command
 ```
 
-Use any combination of the `a`, `m`, `q`, and `v` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` is a separate modifier — it is **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` is a separate modifier — it is **not** included in "scrape all".)
 
 ### Scraping all your courses
 
@@ -100,6 +101,8 @@ node index.js -o courses https://<school_domain>
 The scraper queries the Canvas API (`/api/v1/courses`, using your cookies) for all your courses — current **and** past/completed enrollments — and scrapes each one into its own subfolder of the output directory, named `<Course Name> (<id>)`. (Courses you can no longer open, e.g. those date-restricted after a term ends, are skipped.) If your institution blocks cookie-authenticated API access, it automatically falls back to scraping the `/courses` page instead. The same flags apply to every course; a course that fails (e.g. an inaccessible homepage) is logged and skipped without stopping the rest. Give a full course URL to scrape just that one course (output goes straight into the output directory, as before).
 
 The `-v` flag archives the course's **Videos** tab (the Panopto course folder): it launches the Panopto LTI tab while signed in, finds the folder it lands on, and downloads every session as `mp4` via `yt-dlp` into `VIDEOS/`. This requires your Panopto cookies in the cookies file (see [Cookies for Panopto](#cookies-for-panopto-and-other-login-gated-videos)). The nav tab is matched by the label `Videos` by default; if your course names it differently, set `"videosTabLabel"` in `config.json`.
+
+The `-s` flag archives the course's **Study.Net Materials** tab into `STUDYNET/`. Study.Net is a third-party course-pack tool reached through a signed Canvas LTI launch: the scraper opens the tab while signed in, which performs the launch and renders the materials list, then downloads each material (the per-user watermarked PDF / spreadsheet) into `STUDYNET/`. Files are saved **in the instructor's order** with a zero-padded numeric prefix (`01 - <name>.pdf`, `02 - …`) so they sort correctly on disk instead of alphabetically; the numbering matches the list you see in the tab. Website links the instructor included in the list are saved in place as `.url` shortcuts (e.g. `03 - <name> (LINK).url`), keeping the reading list complete and contiguous. Because the launch itself establishes the Study.Net session in the browser, your **Canvas** cookies are normally sufficient — you do **not** need to add Study.Net cookies to the cookies file. (You can still add a `www.study.net` `PHPSESSID` cookie as a fallback; note that a Study.Net session is short-lived — roughly a day.) The nav tab is matched by the label `Study.Net Materials` by default; if your course names it differently, set `"studyNetTabLabel"` in `config.json`. Anything the tool refuses to hand over (view-only content) is skipped with a warning that points you to the tab so you can open it manually.
 
 ### Transcribing videos
 
@@ -206,6 +209,9 @@ Some course materials are **LTI external-tool launches** rather than direct file
 - VIDEOS
   - {Panopto folder name}
     - {Session recordings as mp4}
+- STUDYNET
+  - {NN - Material Name.pdf / .xlsx / …}
+  - {NN - Website Name (LINK).url}
 - HOMEPAGE.pdf
 
 ## Video Tutorial

@@ -54,6 +54,7 @@ async function scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape) {
   if (toScrape.m) await scrapers.scrapeModules(browser, cookies, courseUrl, courseDir);
   if (toScrape.q) await scrapers.scrapeQuizzes(browser, cookies, courseUrl, courseDir);
   if (toScrape.v) await scrapers.scrapeVideos(browser, cookies, courseUrl, courseDir);
+  if (toScrape.s) await scrapers.scrapeStudyNet(browser, cookies, courseUrl, courseDir);
 
   console.log(`*** FINISHED SCRAPING ${courseUrl} ***`);
 }
@@ -140,6 +141,14 @@ const flagDef = [
   },
   {
     type: "confirm",
+    name: "s",
+    message: "Do you want to scrape the Study.Net Materials page?",
+    default: false,
+    flags: "-s",
+    description: "scrape the Study.Net Materials page",
+  },
+  {
+    type: "confirm",
     name: "t",
     message:
       "Do you want to transcribe downloaded videos? (runs config.json transcribeCommand)",
@@ -198,7 +207,7 @@ program.action(async (url, options) => {
   fs.mkdirSync(dir, { recursive: true });
 
   // figure out what to scrape (t is a separate modifier, handled above)
-  const toScrape = { a: options.a, m: options.m, q: options.q, v: options.v };
+  const toScrape = { a: options.a, m: options.m, q: options.q, v: options.v, s: options.s };
   if (Object.values(toScrape).every((v) => !v)) {
     helpers.print("NOTE", "FLAGS", "No flags set. Scraping all...", 0);
     for (const key in toScrape) toScrape[key] = true;

@@ -23,5 +23,6 @@
   },
   "videoHosts": [],
   "videosTabLabel": "Videos",
+  "studyNetTabLabel": "Study.Net Materials",
   "transcribeCommand": ""
 }
