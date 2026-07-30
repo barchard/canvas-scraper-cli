@@ -171,6 +171,8 @@ flagDef.forEach((flag) =>
   program.option(flag.flags, flag.description, flag.default)
 );
 
+program.option("--all", "scrape all content types (-a -m -q -v -s)");
+
 program.action(async (url, options) => {
   if (!url) {
     helpers.print("NOTE", "URL", "No URL provided. Entering wizard...");
@@ -208,6 +210,9 @@ program.action(async (url, options) => {
 
   // figure out what to scrape (t is a separate modifier, handled above)
   const toScrape = { a: options.a, m: options.m, q: options.q, v: options.v, s: options.s };
+  if (options.all) {
+    for (const key in toScrape) toScrape[key] = true;
+  }
   if (Object.values(toScrape).every((v) => !v)) {
     helpers.print("NOTE", "FLAGS", "No flags set. Scraping all...", 0);
     for (const key in toScrape) toScrape[key] = true;
