@@ -928,7 +928,8 @@ const exported = {
         return Array.from(document.querySelectorAll(sectionSelector)).map(
           (section) => {
             // get all links in the section
-            let name = section.querySelector(headerSelector).innerText;
+            let header = section.querySelector(headerSelector);
+            let name = header ? header.innerText : "";
             let links = Array.from(section.querySelectorAll(itemSelector))
               .map((link) => {
                 let url = link.href;
