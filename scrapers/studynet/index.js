@@ -1,5 +1,6 @@
 import fs from "fs";
 import helpers from "../helpers.js";
+import report from "../report.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -286,6 +287,12 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
       const res = await downloadOne(frame, downloadUrl, item.token).catch(() => null);
       if (!res || res.contentError || !res.base64) {
         problems.push(item.name || item.matId);
+        report.recordFailure(
+          item.matUrl || item.name || item.matId,
+          `Study.Net material unavailable${
+            res && res.contentError ? ` (${res.contentError})` : ""
+          }`
+        );
         helpers.print(
           "WARNING",
           "STUDY.NET",
@@ -299,7 +306,9 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
       const filename = helpers.stripInvalid(
         `${prefix} - ${withExtension(item.name, item.matUrl, res.contentFilename)}`
       );
-      fs.writeFileSync(`${studynetDir}/${filename}`, Buffer.from(res.base64, "base64"));
+      const filePath = `${studynetDir}/${filename}`;
+      fs.writeFileSync(filePath, Buffer.from(res.base64, "base64"));
+      report.record(filePath, item.matUrl || downloadUrl);
       helpers.print("NOTE", "STUDY.NET", `Saved ${filename}`, 1);
     }
 

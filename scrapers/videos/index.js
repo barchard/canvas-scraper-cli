@@ -1,5 +1,6 @@
 import fs from "fs";
 import helpers from "../helpers.js";
+import report from "../report.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -170,6 +171,7 @@ async function scrapeVideos(browser, cookies, url, dir) {
         .downloadVideo(folderUrl, videosDir, cookies)
         .catch(() => false);
       if (!ok) {
+        report.recordFailure(folderUrl, "Panopto folder download failed");
         helpers.print(
           "WARNING",
           "VIDEOS",
@@ -188,9 +190,16 @@ async function scrapeVideos(browser, cookies, url, dir) {
         const ok = await helpers
           .downloadVideo(s, videosDir, cookies)
           .catch(() => false);
-        if (!ok) helpers.print("WARNING", "VIDEOS", `Could not download ${s}`, 1);
+        if (!ok) {
+          report.recordFailure(s, "Panopto session download failed");
+          helpers.print("WARNING", "VIDEOS", `Could not download ${s}`, 1);
+        }
       }
     } else {
+      report.recordFailure(
+        info.href || frame.url(),
+        "could not find Panopto folder or sessions"
+      );
       helpers.print(
         "WARNING",
         "VIDEOS",

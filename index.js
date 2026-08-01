@@ -6,6 +6,7 @@ import inquirer from "inquirer";
 
 import helpers from "./scrapers/helpers.js";
 import scrapers from "./scrapers/index.js";
+import report from "./scrapers/report.js";
 
 /**
  * Parses the target URL into a Canvas domain and (optional) course id.
@@ -31,9 +32,12 @@ function parseTarget(url) {
 /**
  * Scrapes one course into `courseDir` (homepage PDF + the selected sections).
  */
-async function scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape) {
+async function scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape, courseName) {
   console.log(`*** SCRAPING COURSE FROM ${courseUrl} ***`);
   fs.mkdirSync(courseDir, { recursive: true });
+
+  // Attribute every asset downloaded below to this course in the --report CSV.
+  report.setCourse(courseName, courseUrl);
 
   const page = await helpers.newPage(browser, cookies, courseUrl);
   if (page.status !== 200) {
@@ -46,6 +50,11 @@ async function scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape) {
     );
     await page.close().catch(() => {});
     return;
+  }
+  // When no name was passed (single-course mode), fall back to the homepage title.
+  if (!courseName) {
+    const title = await page.title().catch(() => "");
+    if (title) report.setCourse(title.trim(), courseUrl);
   }
   await page.pdf({ path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
   await page.close().catch(() => {});
@@ -156,6 +165,15 @@ const flagDef = [
     flags: "-t",
     description: "transcribe downloaded videos via config.json transcribeCommand",
   },
+  {
+    type: "confirm",
+    name: "report",
+    message:
+      "Do you want to write a CSV report of every downloaded asset (report.csv)?",
+    default: false,
+    flags: "--report",
+    description: "write a report.csv listing every downloaded asset",
+  },
 ];
 
 const program = new Command();
@@ -200,6 +218,9 @@ program.action(async (url, options) => {
       );
     }
   }
+
+  // opt-in CSV report of every downloaded asset (written to <output>/report.csv)
+  if (options.report) report.enable();
 
   console.log(`FLAGS: ${JSON.stringify(options)}`);
 
@@ -249,7 +270,8 @@ program.action(async (url, options) => {
             cookies,
             `${domain}/courses/${c.id}`,
             courseDir,
-            toScrape
+            toScrape,
+            c.name
           );
         } catch (e) {
           helpers.print(
@@ -265,6 +287,37 @@ program.action(async (url, options) => {
   }
 
   browser.close();
+
+  if (options.report) {
+    try {
+      const reportPath = `${dir}/report.csv`;
+      const count = report.write(reportPath);
+      helpers.print(
+        "NOTE",
+        "REPORT",
+        `Wrote ${count} asset(s) to ${reportPath}`,
+        0
+      );
+    } catch (e) {
+      helpers.print("ERROR", "REPORT", "Could not write report.csv", 0, e);
+    }
+
+    try {
+      const skippedPath = `${dir}/report-skipped.csv`;
+      const skippedCount = report.writeSkipped(skippedPath);
+      if (skippedCount > 0) {
+        helpers.print(
+          "NOTE",
+          "REPORT",
+          `Wrote ${skippedCount} skipped/failed download(s) to ${skippedPath}`,
+          0
+        );
+      }
+    } catch (e) {
+      helpers.print("ERROR", "REPORT", "Could not write report-skipped.csv", 0, e);
+    }
+  }
+
   console.log("*** DONE ***");
 });
 

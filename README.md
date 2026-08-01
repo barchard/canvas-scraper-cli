@@ -85,10 +85,38 @@ Options:
   -v                       scrape the Videos (Panopto) page (default: false)
   -s                       scrape the Study.Net Materials page (default: false)
   -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
+  --report                 write a report.csv listing every downloaded asset (default: false)
   -h, --help               display help for command
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` is a separate modifier — it is **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` and `--report` are separate modifiers — they are **not** included in "scrape all".)
+
+### Asset report (`--report`)
+
+Add `--report` to write a `report.csv` into the output directory listing **every asset the scraper downloaded** — Canvas files, external documents, archived web pages, Panopto/YouTube videos, Harvard Business Publishing PDFs, and Study.Net materials. Each row has:
+
+| Column | Description |
+| --- | --- |
+| `file` | the saved filename |
+| `type` | the file's extension (e.g. `pdf`, `mp4`, `docx`) |
+| `size_bytes` | the exact size in bytes |
+| `size` | the same size, human-readable (`KB`, `MB`, `GB`, … as appropriate) |
+| `course_name` | the course the asset came from |
+| `course_url` | that course's Canvas URL |
+| `original_url` | where the asset was downloaded from |
+
+When scraping all your courses, every course's assets are listed together in one `report.csv` at the top of the output directory. Generated page snapshots (the `HOMEPAGE.pdf` / `MODULE.pdf` / `QUIZ.pdf` course-navigation PDFs) are **not** included — the report covers downloaded assets, not the tool's own page captures.
+
+Alongside it, a second file — `report-skipped.csv` — lists every asset that was **skipped or failed to download** (view-only Study.Net materials, Panopto folders/sessions `yt-dlp` couldn't fetch, external-tool launches with no downloadable file, links that returned an error page, etc.):
+
+| Column | Description |
+| --- | --- |
+| `url` | the asset's source URL |
+| `reason` | why it was skipped or failed |
+| `course_name` | the course the asset belonged to |
+| `course_url` | that course's Canvas URL |
+
+`report-skipped.csv` is only written when there is at least one skipped/failed download.
 
 ### Scraping all your courses
 

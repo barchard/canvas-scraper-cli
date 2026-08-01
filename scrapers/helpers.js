@@ -8,6 +8,8 @@ import { promisify } from "util";
 import { Browser, Page } from "puppeteer";
 import { Readable } from "stream";
 
+import report from "./report.js";
+
 const execFileAsync = promisify(execFile);
 
 let warnedMissingYtDlp = false;
@@ -96,9 +98,20 @@ const exported = {
       }
     }
 
-    const fileStream = fs.createWriteStream(path.join(dir, filename));
-    await response.body.pipe(fileStream);
-    return !(filename === backupName);
+    const filePath = path.join(dir, filename);
+    await new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(filePath);
+      response.body.on("error", reject);
+      fileStream.on("error", reject);
+      fileStream.on("finish", resolve);
+      response.body.pipe(fileStream);
+    });
+    // No content-disposition filename means the server likely returned an error
+    // page instead of the file — the caller treats this as a failed download.
+    const ok = filename !== backupName;
+    if (ok) report.record(filePath, url);
+    else report.recordFailure(url, "no file returned (missing content-disposition)");
+    return ok;
   },
 
   /**
@@ -498,13 +511,15 @@ const exported = {
 
     filename = this.stripInvalid(filename);
 
+    const filePath = path.join(dir, filename);
     await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(path.join(dir, filename));
+      const fileStream = fs.createWriteStream(filePath);
       response.body.on("error", reject);
       fileStream.on("error", reject);
       fileStream.on("finish", resolve);
       response.body.pipe(fileStream);
     });
+    report.record(filePath, url);
     return true;
   },
 
@@ -584,11 +599,13 @@ const exported = {
       name = this.stripInvalid(name || backupName);
       if (!/\.pdf$/i.test(name)) name += ".pdf";
 
+      const filePath = path.join(dir, name);
       await page.pdf({
-        path: path.join(dir, name),
+        path: filePath,
         format: "Letter",
         printBackground: true,
       });
+      report.record(filePath, url);
       return true;
     } catch (e) {
       return false;
@@ -650,8 +667,13 @@ const exported = {
 
     args.push(url);
 
+    // yt-dlp picks its own output filenames (and playlist subfolders), so snapshot
+    // the directory and report whatever new files the download adds.
+    const before = report.snapshot(absDir);
+
     try {
       await execFileAsync("yt-dlp", args);
+      report.recordNewFiles(absDir, before, url);
       return true;
     } catch (e) {
       if (e.code === "ENOENT") {
@@ -776,7 +798,9 @@ const exported = {
         if (!/\.pdf$/i.test(filename)) filename += ".pdf";
 
         const buf = Buffer.from(result.base64, "base64");
-        fs.writeFileSync(path.join(dir, this.stripInvalid(filename)), buf);
+        const filePath = path.join(dir, this.stripInvalid(filename));
+        fs.writeFileSync(filePath, buf);
+        report.record(filePath, retrieveUrl);
         return { handled: true, ok: true };
       }
 
@@ -841,6 +865,7 @@ const exported = {
         hostname = new URL(url).hostname.toLowerCase();
       } catch (e) {
         problematic.push(url);
+        report.recordFailure(url, "invalid URL");
         continue;
       }
 
@@ -848,9 +873,13 @@ const exported = {
         const success = this.isVideoHost(hostname)
           ? await this.downloadVideo(url, dir, cookies)
           : await this.downloadExternalResource(page.browser(), url, dir, i);
-        if (!success) problematic.push(url);
+        if (!success) {
+          problematic.push(url);
+          report.recordFailure(url, "download failed");
+        }
       } catch (e) {
         problematic.push(url);
+        report.recordFailure(url, e.message || "download error");
       }
     }
 
@@ -867,7 +896,10 @@ const exported = {
       } catch (e) {
         ok = false;
       }
-      if (!ok) problematic.push(url);
+      if (!ok) {
+        problematic.push(url);
+        report.recordFailure(url, "external tool launch not downloadable");
+      }
     }
 
     return problematic;
