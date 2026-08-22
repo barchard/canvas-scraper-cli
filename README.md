@@ -86,10 +86,11 @@ Options:
   -s                       scrape the Study.Net Materials page (default: false)
   -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
   --report                 write a report.csv listing every downloaded asset (default: false)
+  --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   -h, --help               display help for command
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t` and `--report` are separate modifiers — they are **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, and `--wiki` are separate modifiers — they are **not** included in "scrape all".)
 
 ### Asset report (`--report`)
 
@@ -117,6 +118,21 @@ Alongside it, a second file — `report-skipped.csv` — lists every asset that 
 | `course_url` | that course's Canvas URL |
 
 `report-skipped.csv` is only written when there is at least one skipped/failed download.
+
+### LLM Wiki layout (`--wiki`)
+
+Add `--wiki` to reorganize the output into the [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) popularized by Andrej Karpathy — a layout that separates immutable source material from LLM-generated synthesis, so you can point an agent (Claude Code, Codex, …) at the folder and have it build a knowledge base instead of re-reading every file on each query:
+
+```
+<output>/
+  raw/        every scraped file, grouped by course/content type — immutable sources
+  wiki/       LLM-generated synthesis pages (scaffolded empty, the agent owns this)
+  index.md    a catalog of everything under raw/, linked and grouped by course/category
+  log.md      an append-only record of each ingest
+  CLAUDE.md   the schema: how the vault is laid out and how an agent should maintain it
+```
+
+The scraper fills the `raw/`, `index.md`, `log.md`, and `CLAUDE.md` layers and leaves `wiki/` empty for an agent to build out. `index.md` links each source with its type, size, and (where known) the URL it came from — `--wiki` turns the asset recorder on for those source links, so you don't also need `--report`. Combine `--wiki` with the content flags as usual (e.g. `--all --wiki`).
 
 ### Scraping all your courses
 

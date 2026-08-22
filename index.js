@@ -7,6 +7,7 @@ import inquirer from "inquirer";
 import helpers from "./scrapers/helpers.js";
 import scrapers from "./scrapers/index.js";
 import report from "./scrapers/report.js";
+import wiki from "./scrapers/wiki.js";
 
 /**
  * Parses the target URL into a Canvas domain and (optional) course id.
@@ -174,6 +175,16 @@ const flagDef = [
     flags: "--report",
     description: "write a report.csv listing every downloaded asset",
   },
+  {
+    type: "confirm",
+    name: "wiki",
+    message:
+      "Do you want to organize the output as an LLM Wiki (raw/ + index.md + wiki/)?",
+    default: false,
+    flags: "--wiki",
+    description:
+      "organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md)",
+  },
 ];
 
 const program = new Command();
@@ -219,8 +230,10 @@ program.action(async (url, options) => {
     }
   }
 
-  // opt-in CSV report of every downloaded asset (written to <output>/report.csv)
-  if (options.report) report.enable();
+  // opt-in CSV report of every downloaded asset (written to <output>/report.csv).
+  // --wiki also needs the recorder on: it uses the source URLs to link each
+  // catalog entry back to where it came from.
+  if (options.report || options.wiki) report.enable();
 
   console.log(`FLAGS: ${JSON.stringify(options)}`);
 
@@ -315,6 +328,22 @@ program.action(async (url, options) => {
       }
     } catch (e) {
       helpers.print("ERROR", "REPORT", "Could not write report-skipped.csv", 0, e);
+    }
+  }
+
+  // opt-in reorganization into the LLM Wiki layout (raw/ + index.md + wiki/).
+  // Runs last so it can sweep everything else the run produced into raw/.
+  if (options.wiki) {
+    try {
+      const { sources } = wiki.build(dir, report.rows);
+      helpers.print(
+        "NOTE",
+        "WIKI",
+        `Organized ${sources} source(s) into ${dir}/raw and wrote ${dir}/index.md`,
+        0
+      );
+    } catch (e) {
+      helpers.print("ERROR", "WIKI", "Could not organize output as an LLM Wiki", 0, e);
     }
   }
 
