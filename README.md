@@ -88,10 +88,18 @@ Options:
   --report                 write a report.csv listing every downloaded asset (default: false)
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
+  --all                    scrape all content types (-a -m -q -v -s)
+  --tui                    run with the interactive terminal UI (Ink)
   -h, --help               display help for command
 ```
 
 Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
+
+### Terminal UI (`--tui`)
+
+Add `--tui` (or run `npm run tui`) to drive a scrape from an [Ink](https://github.com/vadimdemedes/ink) terminal UI instead of a wall of log lines: a live spinner, the current course and phase (`3/12 — Modules`), a scrolling pane of the most recent log messages, and a final summary. It accepts all the same flags — e.g. `node index.js https://<school_domain> --all --tui` — and falls back to the interactive wizard when no URL is given.
+
+The scraping logic itself lives in a UI-agnostic core (`core/scrape.js`, `runScrape(url, options, hooks)`); the CLI, the TUI, and a future GUI are all thin front-ends over it, so the three stay in sync automatically.
 
 ### Asset report (`--report`)
 

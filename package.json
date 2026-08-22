@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "node index.js",
+    "tui": "node index.js --tui",
     "start": "./canvas-scraper.exe",
     "build-win": "nexe -t win-x64-latest index.js -o canvas-scraper-win --build",
     "build-linux": "nexe -t linux-x64-latest index.js -o canvas-scraper-linux --build",
@@ -17,8 +18,10 @@
   "dependencies": {
     "commander": "^11.1.0",
     "dotenv-flow": "^4.1.0",
+    "ink": "^7.1.1",
     "inquirer": "^9.2.23",
     "p-limit": "^5.0.0",
-    "puppeteer": "^21.9.0"
+    "puppeteer": "^21.9.0",
+    "react": "^19.2.8"
   }
 }

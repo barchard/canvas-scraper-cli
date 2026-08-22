@@ -913,8 +913,27 @@ const exported = {
    * @param {Number} indent number of indents to use
    * @param {any} additional additional information to print (e.g error stack trace)
    */
+  // Optional sink for print(). When set (via setPrinter), every print() call is
+  // forwarded to it instead of going straight to the console, so a front-end
+  // (e.g. the Ink TUI) can render log lines itself. null = default console.
+  printer: null,
+
+  /**
+   * Redirects print() output to `fn` (or back to the console when null).
+   * @param {?function} fn receives a record { type, name, message, indent,
+   *   additional, line } for each print() call.
+   */
+  setPrinter(fn) {
+    this.printer = fn || null;
+  },
+
   print(type, name, message, indent = 0, additional = null) {
-    console.log(`[${type}]${"  ".repeat(indent)} ${name} | ${message}`);
+    const line = `[${type}]${"  ".repeat(indent)} ${name} | ${message}`;
+    if (this.printer) {
+      this.printer({ type, name, message, indent, additional, line });
+      return;
+    }
+    console.log(line);
     if (additional) console.log(additional);
   },
 
