@@ -87,10 +87,11 @@ Options:
   -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
   --report                 write a report.csv listing every downloaded asset (default: false)
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
+  --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
   -h, --help               display help for command
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, and `--wiki` are separate modifiers — they are **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
 
 ### Asset report (`--report`)
 
@@ -133,6 +134,22 @@ Add `--wiki` to reorganize the output into the [LLM Wiki pattern](https://gist.g
 ```
 
 The scraper fills the `raw/`, `index.md`, `log.md`, and `CLAUDE.md` layers and leaves `wiki/` empty for an agent to build out. `index.md` links each source with its type, size, and (where known) the URL it came from — `--wiki` turns the asset recorder on for those source links, so you don't also need `--report`. Combine `--wiki` with the content flags as usual (e.g. `--all --wiki`).
+
+### Octarine workspace (`--octarine`)
+
+Add `--octarine` to organize the output as an [Octarine](https://octarine.app) workspace — Octarine is a local-first Markdown note-taking / personal-knowledge app, so the scrape becomes a set of notes you can open directly:
+
+```
+<output>/                    (the Octarine workspace)
+  .attachments/              every scraped file, grouped by course/content type
+  Courses/<Course>.md        one note per course — YAML properties, a #course tag,
+                             and a doclink to each of that course's assets
+  Index.md                   a note that doclinks every course note
+```
+
+Following Octarine's conventions, downloaded files are kept in the workspace's `.attachments/` folder, notes carry YAML frontmatter ("Properties") and `#tags`, and everything is cross-linked with doclinks (`[[Courses/<Course>]]`, `[[.attachments/<Course>/…/file.pdf]]`) using the full path from the workspace root. Each asset doclink is annotated with its type, size, and (where known) source URL — like `--wiki`, this flag turns the asset recorder on for those links, so you don't also need `--report`. Point Octarine at the output directory to open it as a workspace.
+
+`--wiki` and `--octarine` are two alternative ways to lay out the same files; if you pass both, `--wiki` wins and `--octarine` is skipped.
 
 ### Scraping all your courses
 

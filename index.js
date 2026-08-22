@@ -8,6 +8,7 @@ import helpers from "./scrapers/helpers.js";
 import scrapers from "./scrapers/index.js";
 import report from "./scrapers/report.js";
 import wiki from "./scrapers/wiki.js";
+import octarine from "./scrapers/octarine.js";
 
 /**
  * Parses the target URL into a Canvas domain and (optional) course id.
@@ -185,6 +186,16 @@ const flagDef = [
     description:
       "organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md)",
   },
+  {
+    type: "confirm",
+    name: "octarine",
+    message:
+      "Do you want to organize the output as an Octarine workspace (.attachments/ + course notes)?",
+    default: false,
+    flags: "--octarine",
+    description:
+      "organize output into an Octarine workspace (.attachments/, course notes, Index.md)",
+  },
 ];
 
 const program = new Command();
@@ -231,9 +242,9 @@ program.action(async (url, options) => {
   }
 
   // opt-in CSV report of every downloaded asset (written to <output>/report.csv).
-  // --wiki also needs the recorder on: it uses the source URLs to link each
-  // catalog entry back to where it came from.
-  if (options.report || options.wiki) report.enable();
+  // --wiki and --octarine also need the recorder on: they use the source URLs
+  // to link each catalog entry back to where it came from.
+  if (options.report || options.wiki || options.octarine) report.enable();
 
   console.log(`FLAGS: ${JSON.stringify(options)}`);
 
@@ -344,6 +355,38 @@ program.action(async (url, options) => {
       );
     } catch (e) {
       helpers.print("ERROR", "WIKI", "Could not organize output as an LLM Wiki", 0, e);
+    }
+  }
+
+  // opt-in reorganization into an Octarine workspace (.attachments/ + notes).
+  // --wiki and --octarine are alternative layouts of the same files; if both
+  // are set, --wiki already claimed the output, so skip Octarine.
+  if (options.octarine) {
+    if (options.wiki) {
+      helpers.print(
+        "WARNING",
+        "OCTARINE",
+        "--wiki and --octarine are alternative layouts; --wiki was applied, skipping --octarine.",
+        0
+      );
+    } else {
+      try {
+        const { sources, notes } = octarine.build(dir, report.rows);
+        helpers.print(
+          "NOTE",
+          "OCTARINE",
+          `Organized ${sources} source(s) into ${dir}/.attachments and wrote ${notes} course note(s)`,
+          0
+        );
+      } catch (e) {
+        helpers.print(
+          "ERROR",
+          "OCTARINE",
+          "Could not organize output as an Octarine workspace",
+          0,
+          e
+        );
+      }
     }
   }
 
