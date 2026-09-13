@@ -35,13 +35,11 @@ const flagDef = [
     message: "Please enter the path to the cookies file:",
     default: "cookies.json",
     flags: "-c, --cookies <path>",
-    description: "path to cookies file",
+    description: "path to cookies file (JSON or Netscape HTTP Cookie File)",
     onlyShowValid: true,
     validate: (input) => {
       if (!fs.existsSync(input))
         return "File does not exist. Please enter a valid path.";
-      if (!input.toLowerCase().endsWith("json"))
-        return "Invalid file format. Please enter a path to a JSON file.";
       return true;
     },
   },

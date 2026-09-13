@@ -6,4 +6,6 @@ course
 courses
 cookies.json
 *-cookies.json
+cookies.txt
+*-cookies.txt
 .DS_Store

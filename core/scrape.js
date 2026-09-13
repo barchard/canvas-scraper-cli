@@ -56,6 +56,86 @@ export function readJSON(path, varName) {
   }
 }
 
+/**
+ * Parses a Netscape HTTP Cookie File (the tab-separated format exported by
+ * browser extensions, curl, and yt-dlp) into puppeteer-style cookie objects.
+ *
+ * Each data line has 7 tab-separated fields:
+ *   domain  includeSubdomains  path  secure  expiry  name  value
+ * Lines starting with "#" are comments, except the "#HttpOnly_" prefix that
+ * some tools prepend to a domain to mark an HttpOnly cookie.
+ * @param {string} text raw file contents
+ * @returns {Array<object>} puppeteer-style cookies (name, value, domain, ...)
+ */
+export function parseNetscapeCookies(text) {
+  const cookies = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    // "#HttpOnly_" is the one comment-looking prefix that carries data.
+    let httpOnly = false;
+    let dataLine = raw;
+    if (line.startsWith("#HttpOnly_")) {
+      httpOnly = true;
+      dataLine = raw.replace(/^#HttpOnly_/, "");
+    } else if (line.startsWith("#")) {
+      continue;
+    }
+
+    const fields = dataLine.split("\t");
+    if (fields.length < 7) continue;
+
+    const [domain, , path, secure, expiry, name, ...valueParts] = fields;
+    const expires = Number(expiry);
+    cookies.push({
+      name,
+      value: valueParts.join("\t"),
+      domain,
+      path: path || "/",
+      // Netscape uses 0 for session cookies; puppeteer expects -1.
+      expires: Number.isFinite(expires) && expires > 0 ? expires : -1,
+      httpOnly,
+      secure: secure.toUpperCase() === "TRUE",
+    });
+  }
+  return cookies;
+}
+
+/**
+ * Reads a cookies file, auto-detecting the format (JSON array of puppeteer-style
+ * cookies, or a Netscape HTTP Cookie File) and returning puppeteer-style cookies.
+ * @throws {Error} if the file can't be read or no cookies could be parsed
+ */
+export function readCookies(path) {
+  let text;
+  try {
+    text = fs.readFileSync(path, "utf8");
+  } catch (e) {
+    throw new Error(`Could not read cookies from "${path}": ${e.message}`);
+  }
+
+  const trimmed = text.trimStart();
+  // JSON cookie exports start with an array (or, rarely, a single object).
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Could not parse cookies from "${path}": ${e.message}`);
+    }
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }
+
+  const cookies = parseNetscapeCookies(text);
+  if (cookies.length === 0) {
+    throw new Error(
+      `Could not parse cookies from "${path}": expected a JSON array or a Netscape HTTP Cookie File.`
+    );
+  }
+  return cookies;
+}
+
 /** Resolves which content types to scrape from the options (--all / defaults). */
 function resolveToScrape(options) {
   const toScrape = {
@@ -178,7 +258,7 @@ export async function runScrape(url, options, hooks = {}) {
   let browser;
   try {
     const { domain, courseId } = parseTarget(url);
-    const cookies = readJSON(options.cookies, "cookies");
+    const cookies = readCookies(options.cookies);
     process.env.config = JSON.stringify(readJSON("config.json", "config"));
 
     // opt-in transcription of downloaded videos (via config.json transcribeCommand)
