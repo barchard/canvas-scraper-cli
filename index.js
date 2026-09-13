@@ -4,6 +4,7 @@ import inquirer from "inquirer";
 
 import helpers from "./scrapers/helpers.js";
 import { runScrape } from "./core/scrape.js";
+import { runLogin } from "./core/login.js";
 import { renderTui } from "./tui/app.js";
 
 const argDef = [
@@ -138,6 +139,46 @@ flagDef.forEach((flag) =>
 
 program.option("--all", "scrape all content types (-a -m -q -v -s)");
 program.option("--tui", "run with the interactive terminal UI (Ink)");
+program.option(
+  "--login",
+  "open a browser to log in and capture cookies before scraping"
+);
+program.option(
+  "--login-mode <mode>",
+  "cookie capture strategy for --login (fresh)",
+  "fresh"
+);
+
+// `login` subcommand: capture cookies interactively, then exit (no scrape).
+program
+  .command("login [url]")
+  .description(
+    "open a browser to log in and save your Canvas (and Panopto) cookies"
+  )
+  .option("-c, --cookies <path>", "path to write the cookies file", "cookies.json")
+  .option("--login-mode <mode>", "cookie capture strategy (fresh)", "fresh")
+  .action(async (url, opts) => {
+    try {
+      if (!url) {
+        const { loginUrl } = await inquirer.prompt([
+          {
+            type: "input",
+            name: "loginUrl",
+            message:
+              "Enter your Canvas URL (https://<school_domain>, or a course URL):",
+            validate: (input) =>
+              /^https:\/\/[^/]+(\/courses\/[^/]+)?\/?$/.test(input) ||
+              "Invalid URL. Use https://<school_domain> or https://<school_domain>/courses/<course_id>.",
+          },
+        ]);
+        url = loginUrl;
+      }
+      await runLogin(url, { cookies: opts.cookies, loginMode: opts.loginMode });
+    } catch (e) {
+      helpers.print("ERROR", "LOGIN", e.message || String(e), 0);
+      process.exit(1);
+    }
+  });
 
 program.action(async (url, options) => {
   if (!url) {
@@ -148,13 +189,23 @@ program.action(async (url, options) => {
     Object.assign(options, answers);
   }
 
-  // --tui renders the run in an Ink terminal UI; otherwise stream to the console.
-  if (options.tui) {
-    await renderTui(url, options);
-    return;
-  }
-
   try {
+    // --tui renders the run in an Ink terminal UI; otherwise stream to the
+    // console. The TUI drives --login itself (as an interactive first phase),
+    // so only run the standalone capture here for the non-TUI path.
+    if (options.tui) {
+      await renderTui(url, options);
+      return;
+    }
+
+    // --login: capture fresh cookies into options.cookies before scraping.
+    if (options.login) {
+      await runLogin(url, {
+        cookies: options.cookies,
+        loginMode: options.loginMode,
+      });
+    }
+
     await runScrape(url, options);
   } catch (e) {
     helpers.print("ERROR", "SCRAPE", e.message || String(e), 0);

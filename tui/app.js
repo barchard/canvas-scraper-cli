@@ -1,7 +1,9 @@
 import React from "react";
-import { render, Box, Text, useApp } from "ink";
+import { render, Box, Text, useApp, useInput } from "ink";
 
 import { runScrape } from "../core/scrape.js";
+import { runLogin } from "../core/login.js";
+import helpers from "../scrapers/helpers.js";
 
 // Written with React.createElement (no JSX) so the app needs no build/transform
 // step and stays friendly to the nexe binary packaging.
@@ -19,7 +21,13 @@ function recordToLines(rec) {
   return lines;
 }
 
-function App({ url, options, onFinish, run = runScrape }) {
+function App({
+  url,
+  options,
+  onFinish,
+  run = runScrape,
+  login = runLogin,
+}) {
   const { exit } = useApp();
   const [logs, setLogs] = React.useState([]);
   const [status, setStatus] = React.useState({
@@ -34,6 +42,33 @@ function App({ url, options, onFinish, run = runScrape }) {
   const [error, setError] = React.useState(null);
   const [summary, setSummary] = React.useState(null);
 
+  // With --login the run begins in an interactive "login" phase (capture cookies
+  // in a browser window) before moving on to "scraping". Otherwise it starts
+  // straight in "scraping" and behaves exactly as before.
+  const [phase, setPhase] = React.useState(options.login ? "login" : "scraping");
+  const [awaitingEnter, setAwaitingEnter] = React.useState(false);
+  const enterResolver = React.useRef(null);
+  const scrapeStarted = React.useRef(false);
+
+  const appendLogs = React.useCallback((newLines) => {
+    setLogs((prev) => [...prev, ...newLines].slice(-MAX_LOGS));
+  }, []);
+
+  // While the login flow is waiting, Enter (pressed here, not in the browser)
+  // resolves the pending prompt and lets capture proceed.
+  useInput(
+    (input, key) => {
+      if (!awaitingEnter) return;
+      if (key.return) {
+        setAwaitingEnter(false);
+        const resolve = enterResolver.current;
+        enterResolver.current = null;
+        if (resolve) resolve();
+      }
+    },
+    { isActive: awaitingEnter }
+  );
+
   // Spinner animation.
   React.useEffect(() => {
     if (done) return undefined;
@@ -41,13 +76,62 @@ function App({ url, options, onFinish, run = runScrape }) {
     return () => clearInterval(id);
   }, [done]);
 
-  // Kick off the scrape and wire progress/log callbacks into component state.
+  // Login phase: capture cookies interactively, then advance to scraping. The
+  // login's helpers.print() output is routed into the log box (as runScrape
+  // does for the scrape), and its "press Enter" prompt is satisfied by useInput
+  // above instead of a terminal readline (which would fight Ink for stdin).
   React.useEffect(() => {
+    if (phase !== "login") return undefined;
+    let cancelled = false;
+
+    const prevPrinter = helpers.printer;
+    helpers.setPrinter((rec) => {
+      if (!cancelled) appendLogs(recordToLines(rec));
+    });
+
+    const prompt = (msg) =>
+      new Promise((resolve) => {
+        if (cancelled) return resolve();
+        appendLogs([msg]);
+        enterResolver.current = resolve;
+        setAwaitingEnter(true);
+        return undefined;
+      });
+
+    login(url, {
+      cookies: options.cookies,
+      loginMode: options.loginMode,
+      prompt,
+    })
+      .then(() => {
+        if (cancelled) return;
+        helpers.setPrinter(prevPrinter);
+        setPhase("scraping");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        helpers.setPrinter(prevPrinter);
+        setError(e.message || String(e));
+        setDone(true);
+      });
+
+    return () => {
+      cancelled = true;
+      helpers.setPrinter(prevPrinter);
+    };
+  }, [phase]);
+
+  // Scrape phase: kick off the scrape and wire progress/log callbacks into
+  // component state. Guarded so it starts exactly once when the phase is
+  // reached (whether that's at mount or after login).
+  React.useEffect(() => {
+    if (phase !== "scraping" || scrapeStarted.current) return undefined;
+    scrapeStarted.current = true;
     let cancelled = false;
     const hooks = {
       onLog: (rec) => {
         if (cancelled) return;
-        setLogs((prev) => [...prev, ...recordToLines(rec)].slice(-MAX_LOGS));
+        appendLogs(recordToLines(rec));
       },
       onProgress: (evt) => {
         if (cancelled) return;
@@ -86,7 +170,7 @@ function App({ url, options, onFinish, run = runScrape }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [phase]);
 
   // Let the final frame paint, then exit cleanly. The error (if any) is reported
   // through onFinish rather than exit() — passing an Error to Ink's exit() would
@@ -112,6 +196,12 @@ function App({ url, options, onFinish, run = runScrape }) {
         { color: error ? "red" : "green", bold: true },
         error ? `✖ ${error}` : "✔ Done"
       )
+    : phase === "login"
+    ? h(
+        Text,
+        null,
+        `${SPINNER[frame]} Logging in — finish signing in in the browser window`
+      )
     : h(
         Text,
         null,
@@ -119,8 +209,18 @@ function App({ url, options, onFinish, run = runScrape }) {
           (status.total ? ` (${status.index}/${status.total})` : "")
       );
 
+  // During login, prompt the user to press Enter here once they've signed in.
+  const promptLine =
+    !done && awaitingEnter
+      ? h(
+          Text,
+          { color: "cyan", bold: true },
+          "→ Press Enter here once you're logged in (open Panopto too for videos)."
+        )
+      : null;
+
   const courseLine =
-    !done && status.course
+    !done && phase === "scraping" && status.course
       ? h(
           Text,
           { color: "yellow" },
@@ -159,6 +259,7 @@ function App({ url, options, onFinish, run = runScrape }) {
     { flexDirection: "column" },
     header,
     h(Box, { marginTop: 1 }, statusLine),
+    promptLine,
     courseLine,
     logBox,
     summaryBox

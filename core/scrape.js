@@ -1,7 +1,7 @@
 import fs from "fs";
-import puppeteer from "puppeteer";
 import http from "http";
 
+import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
 import scrapers from "../scrapers/index.js";
 import report from "../scrapers/report.js";
@@ -134,26 +134,6 @@ export function readCookies(path) {
     );
   }
   return cookies;
-}
-
-/**
- * Launches the headless browser. Prefers the locally installed Google Chrome
- * (the "chrome" channel) because Puppeteer's bundled Chromium is pinned to an
- * older build that crashes on launch under newer macOS releases. If no local
- * Chrome is installed, falls back to the bundled browser.
- */
-async function launchBrowser() {
-  try {
-    return await puppeteer.launch({ headless: "new", channel: "chrome" });
-  } catch (e) {
-    helpers.print(
-      "NOTE",
-      "BROWSER",
-      "Local Google Chrome not found; using Puppeteer's bundled browser.",
-      0
-    );
-    return await puppeteer.launch({ headless: "new" });
-  }
 }
 
 /** Resolves which content types to scrape from the options (--all / defaults). */
