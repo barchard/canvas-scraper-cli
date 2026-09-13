@@ -214,7 +214,9 @@ The `-s` flag archives the course's **Study.Net Materials** tab into `STUDYNET/`
 
 ### Transcribing videos
 
-The `-t` flag runs a transcription command on each downloaded video. Set the command in `config.json` as `"transcribeCommand"`; `yt-dlp` runs it once per finished file, replacing `{}` with the video's path (covering playlists/Panopto folders automatically). If `{}` is omitted, the file path is appended.
+The `-t` flag runs a transcription command on each downloaded video. Set the command in `config.json` as `"transcribeCommand"`; it runs once per finished file, replacing `{}` with the video's path (covering playlists/Panopto folders automatically). If `{}` is omitted, the file path is appended.
+
+Transcription runs after each video finishes downloading and reports progress in the terminal UI (a `📝` line with elapsed time, and a percentage bar when the transcriber prints one — most Whisper-family tools do). Since the command is arbitrary, tools that emit no progress simply show elapsed time until they finish.
 
 [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) has no headless CLI, so the practical macOS options are:
 

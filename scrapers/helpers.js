@@ -677,16 +677,15 @@ const exported = {
     if (cookieFile) args.push("--cookies", cookieFile);
 
     // Optional post-download transcription: run the configured command on each
-    // finished file ({} -> the file path). yt-dlp runs this once per downloaded
-    // video, so playlists/folders are covered automatically.
+    // finished file. Rather than yt-dlp's --exec (opaque), we run it ourselves
+    // after the download so we can report transcription progress.
+    let transcribeCmd = "";
     if (process.env.transcribe === "true") {
-      let cmd = "";
       try {
-        cmd = JSON.parse(process.env.config || "{}").transcribeCommand || "";
+        transcribeCmd = JSON.parse(process.env.config || "{}").transcribeCommand || "";
       } catch (e) {
         // no/invalid config
       }
-      if (cmd) args.push("--exec", cmd);
     }
 
     args.push(url);
@@ -694,6 +693,12 @@ const exported = {
     // yt-dlp picks its own output filenames (and playlist subfolders), so snapshot
     // the directory and report whatever new files the download adds.
     const before = report.snapshot(absDir);
+    // A second, report-independent snapshot so we can find the downloaded media
+    // to transcribe even when --report is off (report.snapshot is empty then).
+    // Only needed when transcribing.
+    const filesBefore = transcribeCmd
+      ? new Set(this.listFilesRecursive(absDir))
+      : null;
 
     const num = (s) => {
       const n = Number(s);
@@ -774,7 +779,7 @@ const exported = {
         resolve(false);
       });
 
-      child.on("close", (code) => {
+      child.on("close", async (code) => {
         if (code === 0) {
           this.emitProgress({
             scope: "video",
@@ -782,6 +787,15 @@ const exported = {
             name: currentTitle || url,
           });
           report.recordNewFiles(absDir, before, url);
+          // Transcribe the newly downloaded media (with progress) if enabled.
+          if (transcribeCmd && filesBefore) {
+            const newMedia = this.listFilesRecursive(absDir).filter(
+              (f) => !filesBefore.has(f) && /\.(mp4|m4a|mkv|webm|mp3|wav)$/i.test(f)
+            );
+            if (newMedia.length) {
+              await this.runTranscription(transcribeCmd, newMedia);
+            }
+          }
           return resolve(true);
         }
         // ENOENT is handled by the 'error' handler above (no 'close' with 0).
@@ -794,6 +808,110 @@ const exported = {
         );
         resolve(false);
       });
+    });
+  },
+
+  /** Lists every file under `dir` recursively (absolute paths). */
+  listFilesRecursive(dir) {
+    const out = [];
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      return out;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...this.listFilesRecursive(full));
+      else out.push(full);
+    }
+    return out;
+  },
+
+  /** Wraps a path for a shell command (double-quoted; matches yt-dlp's --exec). */
+  shellQuote(p) {
+    return `"${String(p).replace(/(["\\$`])/g, "\\$1")}"`;
+  },
+
+  /**
+   * Runs the configured transcription command once per file, reporting progress.
+   * Mirrors yt-dlp's --exec: "{}" in the command is replaced with the file path
+   * (quoted); if absent, the path is appended.
+   * @param {string} cmd the transcribeCommand from config.json
+   * @param {Array<string>} files media files to transcribe
+   */
+  async runTranscription(cmd, files) {
+    for (let i = 0; i < files.length; i++) {
+      await this.runTranscribeOne(cmd, files[i], i + 1, files.length);
+    }
+  },
+
+  /** Runs one transcription, emitting scope:"transcribe" progress events. */
+  runTranscribeOne(cmd, file, index, count) {
+    return new Promise((resolve) => {
+      const name = path.basename(file);
+      const quoted = this.shellQuote(file);
+      const fullCmd = cmd.includes("{}")
+        ? cmd.replaceAll("{}", quoted)
+        : `${cmd} ${quoted}`;
+
+      this.emitProgress({ scope: "transcribe", phase: "start", name, index, count });
+      const start = Date.now();
+      let percent = null;
+
+      let child;
+      try {
+        child = spawn(fullCmd, { shell: true });
+      } catch (e) {
+        this.print("WARNING", "TRANSCRIBE", `Could not transcribe ${name}`, 1, e.message);
+        this.emitProgress({ scope: "transcribe", phase: "done", name, index, count });
+        return resolve();
+      }
+
+      // Emit a heartbeat so the elapsed time keeps ticking even when the tool
+      // is quiet (many transcribers print nothing until they finish).
+      const timer = setInterval(() => {
+        this.emitProgress({
+          scope: "transcribe",
+          phase: "progress",
+          name,
+          percent,
+          elapsed: (Date.now() - start) / 1000,
+          index,
+          count,
+        });
+      }, 1000);
+
+      // Best-effort percent: most whisper-family tools print a "NN%" somewhere.
+      const scan = (buf) => {
+        const m = String(buf).match(/(\d{1,3})\s*%/g);
+        if (m) {
+          const p = parseInt(m[m.length - 1], 10);
+          if (Number.isFinite(p)) percent = Math.max(0, Math.min(100, p));
+        }
+      };
+      if (child.stdout) child.stdout.on("data", scan);
+      if (child.stderr) child.stderr.on("data", scan);
+
+      const finish = () => {
+        clearInterval(timer);
+        this.emitProgress({
+          scope: "transcribe",
+          phase: "done",
+          name,
+          percent,
+          elapsed: (Date.now() - start) / 1000,
+          index,
+          count,
+        });
+        resolve();
+      };
+
+      child.on("error", (e) => {
+        this.print("WARNING", "TRANSCRIBE", `Could not transcribe ${name}`, 1, e.message);
+        finish();
+      });
+      child.on("close", finish);
     });
   },
 

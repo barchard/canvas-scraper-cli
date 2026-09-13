@@ -402,9 +402,9 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
           setStatus((s) => ({ ...s, phase: evt.label }));
           setDownload(null);
         } else if (evt.type === "download") {
-          // Keep the last video frame visible between playlist items; clear only
-          // when a file finishes (files are quick and would otherwise linger).
-          if (evt.phase === "done" && evt.scope === "file") setDownload(null);
+          // Keep the last video frame visible between playlist items; clear when
+          // a file or a transcription finishes (they'd otherwise linger stale).
+          if (evt.phase === "done" && evt.scope !== "video") setDownload(null);
           else setDownload(evt);
         }
       },
@@ -612,38 +612,47 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         )
       : null;
 
-  // Live download progress (mainly the big Panopto/video downloads, which are
-  // otherwise a single opaque "Downloading…" line).
+  // Live download/transcription progress (mainly the big Panopto/video jobs,
+  // which are otherwise a single opaque line).
   let downloadLines = null;
   if (!done && step === "scraping" && download) {
-    const icon = download.scope === "video" ? "🎬" : "⬇";
-    const playlist =
+    const isTranscribe = download.scope === "transcribe";
+    const icon = isTranscribe ? "📝" : download.scope === "video" ? "🎬" : "⬇";
+    const seq =
       download.count && download.count > 1
         ? ` [${download.index || "?"}/${download.count}]`
         : "";
     const bar = progressBar(download.percent);
     const pct = download.percent != null ? `${Math.floor(download.percent)}%` : "";
-    const size = download.total
-      ? `${fmtBytes(download.received)}/${fmtBytes(download.total)}`
-      : download.received != null
-      ? fmtBytes(download.received)
-      : "";
-    const speed = download.speed ? `${fmtBytes(download.speed)}/s` : "";
-    const eta = download.eta != null ? `ETA ${fmtEta(download.eta)}` : "";
-    const meta = [size, speed, eta].filter(Boolean).join("  ");
 
+    let meta;
+    if (isTranscribe) {
+      // Transcribers rarely report bytes; show elapsed time (and % when known).
+      meta = download.elapsed != null ? fmtEta(download.elapsed) : "";
+    } else {
+      const size = download.total
+        ? `${fmtBytes(download.received)}/${fmtBytes(download.total)}`
+        : download.received != null
+        ? fmtBytes(download.received)
+        : "";
+      const speed = download.speed ? `${fmtBytes(download.speed)}/s` : "";
+      const eta = download.eta != null ? `ETA ${fmtEta(download.eta)}` : "";
+      meta = [size, speed, eta].filter(Boolean).join("  ");
+    }
+
+    const idleLabel = isTranscribe ? "transcribing…" : "downloading…";
     downloadLines = h(
       Box,
       { flexDirection: "column" },
       h(
         Text,
-        { color: "magenta", wrap: "truncate-end" },
-        `${icon}${playlist} ${download.name || ""}`
+        { color: isTranscribe ? "cyan" : "magenta", wrap: "truncate-end" },
+        `${icon}${seq} ${download.name || ""}`
       ),
       h(
         Text,
         null,
-        bar ? h(Text, { color: "green" }, bar) : h(Text, { dimColor: true }, "downloading…"),
+        bar ? h(Text, { color: "green" }, bar) : h(Text, { dimColor: true }, idleLabel),
         h(Text, null, pct ? `  ${pct}` : ""),
         meta ? h(Text, { dimColor: true }, `  ${meta}`) : null
       )

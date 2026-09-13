@@ -439,13 +439,17 @@ function makeProgressSink(hooks, onProgress) {
   if (hooks.onProgress) {
     return (evt) => onProgress({ type: "download", ...evt });
   }
-  // Console fallback: only for videos (files are quick), at ~10% steps.
+  // Console fallback: milestone lines for videos and transcriptions (plain files
+  // are quick, so they stay silent). Progress prints at ~10% steps.
   const lastPctByName = new Map();
   return (evt) => {
-    if (evt.scope !== "video") return;
+    if (evt.scope !== "video" && evt.scope !== "transcribe") return;
+    const label = evt.scope === "transcribe" ? "TRANSCRIBE" : "YT-DLP";
+    const where = evt.count ? ` (${evt.index || "?"}/${evt.count})` : "";
+
     if (evt.phase === "start") {
-      const where = evt.count ? ` (${evt.index || "?"}/${evt.count})` : "";
-      helpers.print("NOTE", "YT-DLP", `⬇ ${evt.name}${where}`, 1);
+      const icon = evt.scope === "transcribe" ? "📝" : "⬇";
+      helpers.print("NOTE", label, `${icon} ${evt.name}${where}`, 1);
       lastPctByName.set(evt.name, -1);
       return;
     }
@@ -453,15 +457,16 @@ function makeProgressSink(hooks, onProgress) {
       lastPctByName.delete(evt.name);
       return;
     }
-    if (evt.percent == null) return;
+    if (evt.percent == null) return; // indeterminate (e.g. a quiet transcriber)
     const bucket = Math.floor(evt.percent / 10) * 10;
     if (bucket > (lastPctByName.get(evt.name) ?? -1)) {
       lastPctByName.set(evt.name, bucket);
-      const size = evt.total
-        ? ` (${fmtBytes(evt.received)}/${fmtBytes(evt.total)})`
-        : "";
-      const speed = evt.speed ? ` @ ${fmtBytes(evt.speed)}/s` : "";
-      helpers.print("NOTE", "YT-DLP", `  ${bucket}%${size}${speed} — ${evt.name}`, 1);
+      const size =
+        evt.scope === "video" && evt.total
+          ? ` (${fmtBytes(evt.received)}/${fmtBytes(evt.total)})`
+          : "";
+      const speed = evt.scope === "video" && evt.speed ? ` @ ${fmtBytes(evt.speed)}/s` : "";
+      helpers.print("NOTE", label, `  ${bucket}%${size}${speed} — ${evt.name}`, 1);
     }
   };
 }
