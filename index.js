@@ -5,7 +5,6 @@ import inquirer from "inquirer";
 import helpers from "./scrapers/helpers.js";
 import { runScrape } from "./core/scrape.js";
 import { runLogin } from "./core/login.js";
-import { runWizard } from "./core/wizard.js";
 import { renderTui } from "./tui/app.js";
 
 const argDef = [
@@ -183,13 +182,11 @@ program
 
 program.action(async (url, options) => {
   try {
-    // No URL -> the full guided wizard: prompt for the URL, log in, choose what
-    // to scrape, and pick a course (or all). It returns a resolved URL + a
-    // complete options object, so it drives the scrape directly and returns.
+    // No URL -> the unified Ink wizard: it prompts for the URL, logs in, asks
+    // what to scrape, lets the user pick a course (or all), then runs the
+    // scrape — all in one terminal UI.
     if (!url) {
-      helpers.print("NOTE", "URL", "No URL provided. Entering wizard...", 0);
-      const wiz = await runWizard();
-      await runScrape(wiz.url, wiz.options);
+      await renderTui(undefined, {});
       return;
     }
 

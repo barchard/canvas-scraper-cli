@@ -1,8 +1,10 @@
+import fs from "fs";
 import React from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
 
-import { runScrape } from "../core/scrape.js";
+import { runScrape, parseTarget, readCookies } from "../core/scrape.js";
 import { runLogin } from "../core/login.js";
+import { launchBrowser } from "../core/browser.js";
 import helpers from "../scrapers/helpers.js";
 
 // Written with React.createElement (no JSX) so the app needs no build/transform
@@ -11,6 +13,9 @@ const h = React.createElement;
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_LOGS = 14; // how many recent log lines to keep on screen
+const LIST_WINDOW = 12; // how many list items to show at once
+
+const URL_RE = /^https:\/\/[^/]+(\/courses\/[^/]+)?\/?$/;
 
 /** Flattens a helpers.print record (and any attached error) into text lines. */
 function recordToLines(rec) {
@@ -21,67 +26,234 @@ function recordToLines(rec) {
   return lines;
 }
 
-function App({
-  url,
-  options,
-  onFinish,
-  run = runScrape,
-  login = runLogin,
-}) {
+// ── Reusable keyboard-driven prompts (built on useInput; no extra deps) ──────
+
+/** Single-line text input. Enter submits (after optional validate). */
+function TextPrompt({ message, initialValue = "", validate, onSubmit }) {
+  const [value, setValue] = React.useState(initialValue);
+  const [err, setErr] = React.useState(null);
+
+  useInput((input, key) => {
+    if (key.return) {
+      const v = value.trim();
+      if (validate) {
+        const r = validate(v);
+        if (r !== true) {
+          setErr(typeof r === "string" ? r : "Invalid input.");
+          return;
+        }
+      }
+      onSubmit(v);
+      return;
+    }
+    if (key.backspace || key.delete) {
+      setValue((s) => s.slice(0, -1));
+      setErr(null);
+      return;
+    }
+    // Ignore control/navigation keys; append everything else.
+    if (key.ctrl || key.meta || key.escape || key.tab || key.upArrow ||
+        key.downArrow || key.leftArrow || key.rightArrow) {
+      return;
+    }
+    if (input) {
+      setValue((s) => s + input);
+      setErr(null);
+    }
+  });
+
+  return h(
+    Box,
+    { flexDirection: "column" },
+    h(
+      Text,
+      null,
+      h(Text, { color: "green" }, "? "),
+      h(Text, { bold: true }, `${message} `),
+      h(Text, { color: "cyan" }, value),
+      h(Text, { inverse: true }, " ")
+    ),
+    err ? h(Text, { color: "red" }, err) : null
+  );
+}
+
+/** Windowed slice of a list around the cursor, with scroll hints. */
+function windowed(items, idx) {
+  if (items.length <= LIST_WINDOW) return { start: 0, visible: items };
+  let start = Math.min(
+    Math.max(0, idx - Math.floor(LIST_WINDOW / 2)),
+    items.length - LIST_WINDOW
+  );
+  if (start < 0) start = 0;
+  return { start, visible: items.slice(start, start + LIST_WINDOW) };
+}
+
+/** Single-select list. Up/Down to move, Enter to choose. */
+function SelectPrompt({ message, items, onSelect }) {
+  const [idx, setIdx] = React.useState(0);
+
+  useInput((input, key) => {
+    if (key.upArrow) setIdx((i) => (i - 1 + items.length) % items.length);
+    else if (key.downArrow) setIdx((i) => (i + 1) % items.length);
+    else if (key.return) onSelect(items[idx].value, items[idx]);
+  });
+
+  const { start, visible } = windowed(items, idx);
+  return h(
+    Box,
+    { flexDirection: "column" },
+    h(
+      Text,
+      null,
+      h(Text, { color: "green" }, "? "),
+      h(Text, { bold: true }, message),
+      h(Text, { dimColor: true }, "  (↑/↓, Enter)")
+    ),
+    start > 0 ? h(Text, { dimColor: true }, "  ▲ more") : null,
+    ...visible.map((it, i) => {
+      const absolute = start + i;
+      const active = absolute === idx;
+      return h(
+        Text,
+        { key: absolute, color: active ? "cyan" : undefined },
+        `${active ? "❯ " : "  "}${it.label}`
+      );
+    }),
+    start + visible.length < items.length
+      ? h(Text, { dimColor: true }, "  ▼ more")
+      : null
+  );
+}
+
+/** Multi-select checklist. Up/Down to move, Space to toggle, Enter to submit. */
+function MultiSelectPrompt({ message, items, onSubmit }) {
+  const [idx, setIdx] = React.useState(0);
+  const [checked, setChecked] = React.useState(
+    () => new Set(items.filter((i) => i.checked).map((i) => i.value))
+  );
+
+  useInput((input, key) => {
+    if (key.upArrow) setIdx((i) => (i - 1 + items.length) % items.length);
+    else if (key.downArrow) setIdx((i) => (i + 1) % items.length);
+    else if (input === " ") {
+      setChecked((prev) => {
+        const next = new Set(prev);
+        const v = items[idx].value;
+        if (next.has(v)) next.delete(v);
+        else next.add(v);
+        return next;
+      });
+    } else if (key.return) {
+      onSubmit(items.filter((it) => checked.has(it.value)).map((it) => it.value));
+    }
+  });
+
+  const { start, visible } = windowed(items, idx);
+  return h(
+    Box,
+    { flexDirection: "column" },
+    h(
+      Text,
+      null,
+      h(Text, { color: "green" }, "? "),
+      h(Text, { bold: true }, message),
+      h(Text, { dimColor: true }, "  (↑/↓, Space, Enter)")
+    ),
+    start > 0 ? h(Text, { dimColor: true }, "  ▲ more") : null,
+    ...visible.map((it, i) => {
+      const absolute = start + i;
+      const active = absolute === idx;
+      const box = checked.has(it.value) ? "◉" : "◯";
+      return h(
+        Text,
+        { key: absolute, color: active ? "cyan" : undefined },
+        `${active ? "❯ " : "  "}${box} ${it.label}`
+      );
+    }),
+    start + visible.length < items.length
+      ? h(Text, { dimColor: true }, "  ▼ more")
+      : null
+  );
+}
+
+// ── The unified app: wizard steps → login → scrape, all in one Ink render ────
+
+function App({ url, options = {}, onFinish, run = runScrape, login = runLogin }) {
   const { exit } = useApp();
+
+  // Everything the run needs is collected here. In flag/--tui mode it's seeded
+  // from the CLI options; in wizard mode the steps fill it in.
+  const configRef = React.useRef(
+    url
+      ? { ...options, url, loginMode: options.loginMode || "fresh", _wizard: false }
+      : {
+          url: "",
+          output: "courses/course",
+          cookies: "cookies.json",
+          loginMode: "fresh",
+          a: false, m: false, q: false, v: false, s: false,
+          t: false, report: false, wiki: false, octarine: false,
+          all: false, tui: false,
+          _wizard: true,
+          _domain: "",
+          _courseId: null,
+        }
+  );
+
+  // Step machine. Flag/--tui mode jumps straight to login or scraping; wizard
+  // mode (no url) starts at the first question.
+  const firstStep = url ? (options.login ? "login" : "scraping") : "url";
+  const [step, setStep] = React.useState(firstStep);
+
   const [logs, setLogs] = React.useState([]);
+  const [courses, setCourses] = React.useState([]);
   const [status, setStatus] = React.useState({
-    label: "Starting…",
-    index: 0,
-    total: 0,
-    course: "",
-    phase: "",
+    label: "Starting…", index: 0, total: 0, course: "", phase: "",
   });
   const [frame, setFrame] = React.useState(0);
   const [done, setDone] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [summary, setSummary] = React.useState(null);
-
-  // With --login the run begins in an interactive "login" phase (capture cookies
-  // in a browser window) before moving on to "scraping". Otherwise it starts
-  // straight in "scraping" and behaves exactly as before.
-  const [phase, setPhase] = React.useState(options.login ? "login" : "scraping");
   const [awaitingEnter, setAwaitingEnter] = React.useState(false);
+
   const enterResolver = React.useRef(null);
+  const loginStarted = React.useRef(false);
   const scrapeStarted = React.useRef(false);
 
   const appendLogs = React.useCallback((newLines) => {
     setLogs((prev) => [...prev, ...newLines].slice(-MAX_LOGS));
   }, []);
 
-  // While the login flow is waiting, Enter (pressed here, not in the browser)
-  // resolves the pending prompt and lets capture proceed.
+  const fail = React.useCallback((e) => {
+    setError(e && e.message ? e.message : String(e));
+    setDone(true);
+  }, []);
+
+  // Enter during login satisfies the "press Enter once you're signed in" prompt.
   useInput(
     (input, key) => {
-      if (!awaitingEnter) return;
-      if (key.return) {
+      if (awaitingEnter && key.return) {
         setAwaitingEnter(false);
         const resolve = enterResolver.current;
         enterResolver.current = null;
         if (resolve) resolve();
       }
     },
-    { isActive: awaitingEnter }
+    { isActive: step === "login" && awaitingEnter }
   );
 
-  // Spinner animation.
+  // Spinner animation (only while something is running).
   React.useEffect(() => {
     if (done) return undefined;
     const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER.length), 90);
     return () => clearInterval(id);
   }, [done]);
 
-  // Login phase: capture cookies interactively, then advance to scraping. The
-  // login's helpers.print() output is routed into the log box (as runScrape
-  // does for the scrape), and its "press Enter" prompt is satisfied by useInput
-  // above instead of a terminal readline (which would fight Ink for stdin).
+  // Login phase: capture cookies interactively, then advance (to the next
+  // wizard step, or straight to scraping in flag/--tui mode).
   React.useEffect(() => {
-    if (phase !== "login") return undefined;
+    if (step !== "login" || loginStarted.current) return undefined;
+    loginStarted.current = true;
     let cancelled = false;
 
     const prevPrinter = helpers.printer;
@@ -98,40 +270,87 @@ function App({
         return undefined;
       });
 
-    login(url, {
-      cookies: options.cookies,
-      loginMode: options.loginMode,
+    login(configRef.current.url, {
+      cookies: configRef.current.cookies,
+      loginMode: configRef.current.loginMode,
       prompt,
     })
       .then(() => {
         if (cancelled) return;
         helpers.setPrinter(prevPrinter);
-        setPhase("scraping");
+        setStep(configRef.current._wizard ? "types" : "scraping");
       })
       .catch((e) => {
         if (cancelled) return;
         helpers.setPrinter(prevPrinter);
-        setError(e.message || String(e));
-        setDone(true);
+        fail(e);
       });
 
     return () => {
       cancelled = true;
       helpers.setPrinter(prevPrinter);
     };
-  }, [phase]);
+  }, [step]);
 
-  // Scrape phase: kick off the scrape and wire progress/log callbacks into
-  // component state. Guarded so it starts exactly once when the phase is
-  // reached (whether that's at mount or after login).
+  // Course-fetch phase: list the user's courses so they can pick one.
   React.useEffect(() => {
-    if (phase !== "scraping" || scrapeStarted.current) return undefined;
+    if (step !== "fetchCourses") return undefined;
+    let cancelled = false;
+
+    (async () => {
+      let cookies;
+      try {
+        cookies = readCookies(configRef.current.cookies);
+      } catch (e) {
+        appendLogs([`[WARNING] COURSES | Could not read cookies: ${e.message}`]);
+        if (!cancelled) setStep("output"); // fall back to all courses
+        return;
+      }
+      appendLogs(["[NOTE] COURSES | Fetching your courses…"]);
+      const domain = configRef.current._domain;
+      let found = [];
+      try {
+        // Try the cookie-authed REST API first (no browser needed); only spin
+        // up Chrome for the HTML fallback if the API returns nothing.
+        found = await helpers.listCourses(domain, cookies);
+        if (!found.length) {
+          let browser;
+          try {
+            browser = await launchBrowser();
+            found = await helpers.listCourses(domain, cookies, browser);
+          } finally {
+            if (browser) await browser.close().catch(() => {});
+          }
+        }
+      } catch (e) {
+        appendLogs([`[WARNING] COURSES | Could not list courses: ${e.message}`]);
+      }
+      if (cancelled) return;
+      if (!found.length) {
+        appendLogs([
+          "[WARNING] COURSES | No courses found — falling back to all courses.",
+        ]);
+        setStep("output");
+        return;
+      }
+      setCourses(found);
+      setStep("course");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [step]);
+
+  // Scrape phase: run the scrape and stream progress/log into state.
+  React.useEffect(() => {
+    if (step !== "scraping" || scrapeStarted.current) return undefined;
     scrapeStarted.current = true;
     let cancelled = false;
+
     const hooks = {
       onLog: (rec) => {
-        if (cancelled) return;
-        appendLogs(recordToLines(rec));
+        if (!cancelled) appendLogs(recordToLines(rec));
       },
       onProgress: (evt) => {
         if (cancelled) return;
@@ -144,10 +363,8 @@ function App({
         } else if (evt.type === "course") {
           setStatus((s) => ({
             ...s,
-            index: evt.index,
-            total: evt.total,
-            course: evt.name || evt.url,
-            phase: "",
+            index: evt.index, total: evt.total,
+            course: evt.name || evt.url, phase: "",
           }));
         } else if (evt.type === "phase") {
           setStatus((s) => ({ ...s, phase: evt.label }));
@@ -155,7 +372,7 @@ function App({
       },
     };
 
-    run(url, options, hooks)
+    run(configRef.current.url, configRef.current, hooks)
       .then((sum) => {
         if (cancelled) return;
         setSummary(sum);
@@ -163,14 +380,13 @@ function App({
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(e.message || String(e));
-        setDone(true);
+        fail(e);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [phase]);
+  }, [step]);
 
   // Let the final frame paint, then exit cleanly. The error (if any) is reported
   // through onFinish rather than exit() — passing an Error to Ink's exit() would
@@ -184,34 +400,164 @@ function App({
     return () => clearTimeout(t);
   }, [done]);
 
-  const header = h(
-    Text,
-    { color: "cyan", bold: true },
-    "Canvas Scraper — Terminal UI"
-  );
+  // ── Wizard step handlers ───────────────────────────────────────────────────
 
-  const statusLine = done
-    ? h(
-        Text,
-        { color: error ? "red" : "green", bold: true },
-        error ? `✖ ${error}` : "✔ Done"
-      )
-    : phase === "login"
-    ? h(
-        Text,
-        null,
-        `${SPINNER[frame]} Logging in — finish signing in in the browser window`
-      )
-    : h(
-        Text,
-        null,
-        `${SPINNER[frame]} ${status.label}` +
-          (status.total ? ` (${status.index}/${status.total})` : "")
-      );
+  const onUrl = (value) => {
+    const cfg = configRef.current;
+    cfg.url = value;
+    const { domain, courseId } = parseTarget(value);
+    cfg._domain = domain;
+    cfg._courseId = courseId;
+    setStep("cookieSource");
+  };
 
-  // During login, prompt the user to press Enter here once they've signed in.
+  const onCookieSource = (value) => {
+    setStep(value === "login" ? "cookiesPathLogin" : "cookiesPathFile");
+  };
+
+  const onCookiesPathLogin = (value) => {
+    configRef.current.cookies = value || "cookies.json";
+    setStep("login");
+  };
+
+  const onCookiesPathFile = (value) => {
+    configRef.current.cookies = value || "cookies.json";
+    setStep("types");
+  };
+
+  const onTypes = (values) => {
+    const cfg = configRef.current;
+    cfg.a = values.includes("a");
+    cfg.m = values.includes("m");
+    cfg.q = values.includes("q");
+    cfg.v = values.includes("v");
+    cfg.s = values.includes("s");
+    setStep(cfg._courseId ? "output" : "scope");
+  };
+
+  const onScope = (value) => {
+    setStep(value === "one" ? "fetchCourses" : "output");
+  };
+
+  const onCourse = (id) => {
+    configRef.current.url = `${configRef.current._domain}/courses/${id}`;
+    setStep("output");
+  };
+
+  const onOutput = (value) => {
+    configRef.current.output = value || "courses/course";
+    setStep("extras");
+  };
+
+  const onExtras = (values) => {
+    const cfg = configRef.current;
+    cfg.report = values.includes("report");
+    cfg.wiki = values.includes("wiki");
+    cfg.octarine = values.includes("octarine");
+    cfg.t = values.includes("t");
+    setStep("scraping");
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const header = h(Text, { color: "cyan", bold: true }, "Canvas Scraper — Terminal UI");
+
+  const spin = (label) => h(Text, null, `${SPINNER[frame]} ${label}`);
+
+  let view = null;
+  if (done) {
+    view = h(
+      Text,
+      { color: error ? "red" : "green", bold: true },
+      error ? `✖ ${error}` : "✔ Done"
+    );
+  } else if (step === "url") {
+    view = h(TextPrompt, {
+      message: "Canvas URL (https://<school_domain> or a course URL):",
+      validate: (v) =>
+        URL_RE.test(v) ||
+        "Use https://<school_domain> or https://<school_domain>/courses/<id>.",
+      onSubmit: onUrl,
+    });
+  } else if (step === "cookieSource") {
+    view = h(SelectPrompt, {
+      message: "How should we get your Canvas cookies?",
+      items: [
+        { label: "Log in now (opens a browser) — recommended", value: "login" },
+        { label: "Use an existing cookies file", value: "file" },
+      ],
+      onSelect: onCookieSource,
+    });
+  } else if (step === "cookiesPathLogin") {
+    view = h(TextPrompt, {
+      message: "Where should the captured cookies be saved?",
+      initialValue: "cookies.json",
+      onSubmit: onCookiesPathLogin,
+    });
+  } else if (step === "cookiesPathFile") {
+    view = h(TextPrompt, {
+      message: "Path to your cookies file (JSON or Netscape):",
+      initialValue: "cookies.json",
+      validate: (v) =>
+        fs.existsSync(v) || "File does not exist. Please enter a valid path.",
+      onSubmit: onCookiesPathFile,
+    });
+  } else if (step === "types") {
+    view = h(MultiSelectPrompt, {
+      message: "What do you want to scrape?",
+      items: [
+        { label: "Assignments", value: "a", checked: true },
+        { label: "Modules", value: "m", checked: true },
+        { label: "Quizzes", value: "q", checked: true },
+        { label: "Videos (Panopto)", value: "v", checked: true },
+        { label: "Study.Net Materials", value: "s", checked: true },
+      ],
+      onSubmit: onTypes,
+    });
+  } else if (step === "scope") {
+    view = h(SelectPrompt, {
+      message: "Scrape all your courses, or pick one?",
+      items: [
+        { label: "Pick a specific course", value: "one" },
+        { label: "All my courses", value: "all" },
+      ],
+      onSelect: onScope,
+    });
+  } else if (step === "fetchCourses") {
+    view = spin("Fetching your courses…");
+  } else if (step === "course") {
+    view = h(SelectPrompt, {
+      message: `Which course? (${courses.length} found)`,
+      items: courses.map((c) => ({ label: `${c.name} (${c.id})`, value: c.id })),
+      onSelect: onCourse,
+    });
+  } else if (step === "output") {
+    view = h(TextPrompt, {
+      message: "Output directory:",
+      initialValue: configRef.current.output || "courses/course",
+      onSubmit: onOutput,
+    });
+  } else if (step === "extras") {
+    view = h(MultiSelectPrompt, {
+      message: "Any extras? (optional)",
+      items: [
+        { label: "CSV report of downloaded assets (--report)", value: "report" },
+        { label: "Organize as an LLM Wiki (--wiki)", value: "wiki" },
+        { label: "Organize as an Octarine workspace (--octarine)", value: "octarine" },
+        { label: "Transcribe downloaded videos (-t)", value: "t" },
+      ],
+      onSubmit: onExtras,
+    });
+  } else if (step === "login") {
+    view = spin("Logging in — finish signing in in the browser window");
+  } else if (step === "scraping") {
+    view = spin(
+      `${status.label}` + (status.total ? ` (${status.index}/${status.total})` : "")
+    );
+  }
+
   const promptLine =
-    !done && awaitingEnter
+    !done && step === "login" && awaitingEnter
       ? h(
           Text,
           { color: "cyan", bold: true },
@@ -220,7 +566,7 @@ function App({
       : null;
 
   const courseLine =
-    !done && phase === "scraping" && status.course
+    !done && step === "scraping" && status.course
       ? h(
           Text,
           { color: "yellow" },
@@ -228,21 +574,25 @@ function App({
         )
       : null;
 
-  const logBox = h(
-    Box,
-    {
-      flexDirection: "column",
-      marginTop: 1,
-      borderStyle: "round",
-      borderColor: "gray",
-      paddingX: 1,
-    },
-    logs.length
-      ? logs.map((line, i) =>
-          h(Text, { key: i, dimColor: true, wrap: "truncate-end" }, line)
-        )
-      : h(Text, { dimColor: true }, "Waiting for output…")
-  );
+  const showLogs =
+    done || ["login", "fetchCourses", "scraping"].includes(step);
+  const logBox = showLogs
+    ? h(
+        Box,
+        {
+          flexDirection: "column",
+          marginTop: 1,
+          borderStyle: "round",
+          borderColor: "gray",
+          paddingX: 1,
+        },
+        logs.length
+          ? logs.map((line, i) =>
+              h(Text, { key: i, dimColor: true, wrap: "truncate-end" }, line)
+            )
+          : h(Text, { dimColor: true }, "Waiting for output…")
+      )
+    : null;
 
   const summaryBox =
     done && !error && summary
@@ -258,7 +608,7 @@ function App({
     Box,
     { flexDirection: "column" },
     header,
-    h(Box, { marginTop: 1 }, statusLine),
+    h(Box, { marginTop: 1 }, view),
     promptLine,
     courseLine,
     logBox,
@@ -267,13 +617,17 @@ function App({
 }
 
 /**
- * Renders the Ink terminal UI for a scrape and resolves when it exits.
- * @param {string} url the target Canvas URL
- * @param {object} options the resolved scrape options
+ * Renders the unified Ink terminal UI and resolves when it exits.
+ *
+ * @param {string} [url] the target Canvas URL. Omit it to run the interactive
+ *   wizard (URL → login → what to scrape → which course → extras → scrape).
+ * @param {object} [options] resolved scrape options (used when `url` is given).
  */
-export async function renderTui(url, options) {
+export async function renderTui(url, options = {}) {
   let runError = null;
-  const app = render(h(App, { url, options, onFinish: (e) => (runError = e) }));
+  const app = render(
+    h(App, { url, options, onFinish: (e) => (runError = e) })
+  );
   await app.waitUntilExit();
   if (runError) process.exitCode = 1;
 }
