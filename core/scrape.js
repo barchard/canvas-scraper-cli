@@ -136,6 +136,26 @@ export function readCookies(path) {
   return cookies;
 }
 
+/**
+ * Launches the headless browser. Prefers the locally installed Google Chrome
+ * (the "chrome" channel) because Puppeteer's bundled Chromium is pinned to an
+ * older build that crashes on launch under newer macOS releases. If no local
+ * Chrome is installed, falls back to the bundled browser.
+ */
+async function launchBrowser() {
+  try {
+    return await puppeteer.launch({ headless: "new", channel: "chrome" });
+  } catch (e) {
+    helpers.print(
+      "NOTE",
+      "BROWSER",
+      "Local Google Chrome not found; using Puppeteer's bundled browser.",
+      0
+    );
+    return await puppeteer.launch({ headless: "new" });
+  }
+}
+
 /** Resolves which content types to scrape from the options (--all / defaults). */
 function resolveToScrape(options) {
   const toScrape = {
@@ -287,7 +307,11 @@ export async function runScrape(url, options, hooks = {}) {
 
     const toScrape = resolveToScrape(options);
 
-    browser = await puppeteer.launch({ headless: "new" });
+    // Prefer the locally installed Google Chrome ("chrome" channel) over
+    // Puppeteer's bundled Chromium: the bundled build is pinned to an old
+    // version that crashes on launch under newer macOS releases. Fall back to
+    // the bundled browser if no local Chrome is found.
+    browser = await launchBrowser();
 
     let courseCount = 0;
     if (courseId) {
