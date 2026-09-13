@@ -17,6 +17,36 @@ const LIST_WINDOW = 12; // how many list items to show at once
 
 const URL_RE = /^https:\/\/[^/]+(\/courses\/[^/]+)?\/?$/;
 
+/** Formats a byte count as a short human-readable string (e.g. "1.4 GB"). */
+function fmtBytes(n) {
+  if (n == null) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
+/** Formats a seconds count as m:ss (e.g. 92 -> "1:32"). */
+function fmtEta(s) {
+  if (s == null) return "";
+  const t = Math.max(0, Math.round(s));
+  const m = Math.floor(t / 60);
+  const ss = String(t % 60).padStart(2, "0");
+  return `${m}:${ss}`;
+}
+
+/** Renders a text progress bar of the given width; empty if percent unknown. */
+function progressBar(percent, width = 20) {
+  if (percent == null) return "";
+  const clamped = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clamped / 100) * width);
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
 /** Flattens a helpers.print record (and any attached error) into text lines. */
 function recordToLines(rec) {
   const lines = [rec.line || `[${rec.type}] ${rec.name} | ${rec.message}`];
@@ -207,6 +237,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
 
   const [logs, setLogs] = React.useState([]);
   const [courses, setCourses] = React.useState([]);
+  const [download, setDownload] = React.useState(null);
   const [status, setStatus] = React.useState({
     label: "Starting…", index: 0, total: 0, course: "", phase: "",
   });
@@ -366,8 +397,15 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
             index: evt.index, total: evt.total,
             course: evt.name || evt.url, phase: "",
           }));
+          setDownload(null);
         } else if (evt.type === "phase") {
           setStatus((s) => ({ ...s, phase: evt.label }));
+          setDownload(null);
+        } else if (evt.type === "download") {
+          // Keep the last video frame visible between playlist items; clear only
+          // when a file finishes (files are quick and would otherwise linger).
+          if (evt.phase === "done" && evt.scope === "file") setDownload(null);
+          else setDownload(evt);
         }
       },
     };
@@ -574,6 +612,44 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         )
       : null;
 
+  // Live download progress (mainly the big Panopto/video downloads, which are
+  // otherwise a single opaque "Downloading…" line).
+  let downloadLines = null;
+  if (!done && step === "scraping" && download) {
+    const icon = download.scope === "video" ? "🎬" : "⬇";
+    const playlist =
+      download.count && download.count > 1
+        ? ` [${download.index || "?"}/${download.count}]`
+        : "";
+    const bar = progressBar(download.percent);
+    const pct = download.percent != null ? `${Math.floor(download.percent)}%` : "";
+    const size = download.total
+      ? `${fmtBytes(download.received)}/${fmtBytes(download.total)}`
+      : download.received != null
+      ? fmtBytes(download.received)
+      : "";
+    const speed = download.speed ? `${fmtBytes(download.speed)}/s` : "";
+    const eta = download.eta != null ? `ETA ${fmtEta(download.eta)}` : "";
+    const meta = [size, speed, eta].filter(Boolean).join("  ");
+
+    downloadLines = h(
+      Box,
+      { flexDirection: "column" },
+      h(
+        Text,
+        { color: "magenta", wrap: "truncate-end" },
+        `${icon}${playlist} ${download.name || ""}`
+      ),
+      h(
+        Text,
+        null,
+        bar ? h(Text, { color: "green" }, bar) : h(Text, { dimColor: true }, "downloading…"),
+        h(Text, null, pct ? `  ${pct}` : ""),
+        meta ? h(Text, { dimColor: true }, `  ${meta}`) : null
+      )
+    );
+  }
+
   const showLogs =
     done || ["login", "fetchCourses", "scraping"].includes(step);
   const logBox = showLogs
@@ -611,6 +687,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     h(Box, { marginTop: 1 }, view),
     promptLine,
     courseLine,
+    downloadLines,
     logBox,
     summaryBox
   );

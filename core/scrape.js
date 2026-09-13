@@ -255,6 +255,12 @@ export async function runScrape(url, options, hooks = {}) {
   const prevPrinter = helpers.printer;
   if (hooks.onLog) helpers.setPrinter((rec) => hooks.onLog(rec));
 
+  // Route download progress to the front-end. With a UI (onProgress) we forward
+  // structured events; on the plain CLI we print throttled milestone lines for
+  // videos so a big download isn't silent.
+  const prevProgressSink = helpers.progressSink;
+  helpers.setProgressSink(makeProgressSink(hooks, onProgress));
+
   let browser;
   try {
     const { domain, courseId } = parseTarget(url);
@@ -407,7 +413,57 @@ export async function runScrape(url, options, hooks = {}) {
   } finally {
     if (browser) await browser.close().catch(() => {});
     helpers.setPrinter(prevPrinter);
+    helpers.setProgressSink(prevProgressSink);
   }
+}
+
+/** Formats a byte count as a short human-readable string (e.g. "1.4 GB"). */
+function fmtBytes(n) {
+  if (n == null) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * Builds the download-progress sink for runScrape. With a UI it forwards each
+ * event as `onProgress({ type: "download", ... })`. On the plain CLI (no UI) it
+ * prints throttled milestone lines for videos so a large download isn't silent.
+ */
+function makeProgressSink(hooks, onProgress) {
+  if (hooks.onProgress) {
+    return (evt) => onProgress({ type: "download", ...evt });
+  }
+  // Console fallback: only for videos (files are quick), at ~10% steps.
+  const lastPctByName = new Map();
+  return (evt) => {
+    if (evt.scope !== "video") return;
+    if (evt.phase === "start") {
+      const where = evt.count ? ` (${evt.index || "?"}/${evt.count})` : "";
+      helpers.print("NOTE", "YT-DLP", `⬇ ${evt.name}${where}`, 1);
+      lastPctByName.set(evt.name, -1);
+      return;
+    }
+    if (evt.phase === "done") {
+      lastPctByName.delete(evt.name);
+      return;
+    }
+    if (evt.percent == null) return;
+    const bucket = Math.floor(evt.percent / 10) * 10;
+    if (bucket > (lastPctByName.get(evt.name) ?? -1)) {
+      lastPctByName.set(evt.name, bucket);
+      const size = evt.total
+        ? ` (${fmtBytes(evt.received)}/${fmtBytes(evt.total)})`
+        : "";
+      const speed = evt.speed ? ` @ ${fmtBytes(evt.speed)}/s` : "";
+      helpers.print("NOTE", "YT-DLP", `  ${bucket}%${size}${speed} — ${evt.name}`, 1);
+    }
+  };
 }
 
 export default { runScrape, parseTarget, readJSON };

@@ -3,14 +3,11 @@ import fetch from "node-fetch";
 import path from "path";
 import os from "os";
 import http from "http";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import { Browser, Page } from "puppeteer";
 import { Readable } from "stream";
 
 import report from "./report.js";
-
-const execFileAsync = promisify(execFile);
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -122,13 +119,7 @@ const exported = {
     }
 
     const filePath = path.join(dir, filename);
-    await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(filePath);
-      response.body.on("error", reject);
-      fileStream.on("error", reject);
-      fileStream.on("finish", resolve);
-      response.body.pipe(fileStream);
-    });
+    await this.streamToFile(response, filePath, filename);
     // No content-disposition filename means the server likely returned an error
     // page instead of the file — the caller treats this as a failed download.
     const ok = filename !== backupName;
@@ -535,13 +526,7 @@ const exported = {
     filename = this.stripInvalid(filename);
 
     const filePath = path.join(dir, filename);
-    await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(filePath);
-      response.body.on("error", reject);
-      fileStream.on("error", reject);
-      fileStream.on("finish", resolve);
-      response.body.pipe(fileStream);
-    });
+    await this.streamToFile(response, filePath, filename);
     report.record(filePath, url);
     return true;
   },
@@ -667,6 +652,22 @@ const exported = {
       "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
       "-o",
       outTemplate,
+      // Emit one machine-readable progress line per update (rather than a
+      // \r-updated bar) so we can parse it and drive our own progress display.
+      "--newline",
+      "--progress-template",
+      "download:" +
+        [
+          "CSVID",
+          "%(info.playlist_index)s",
+          "%(info.n_entries)s",
+          "%(progress.downloaded_bytes)s",
+          "%(progress.total_bytes)s",
+          "%(progress.total_bytes_estimate)s",
+          "%(progress.speed)s",
+          "%(progress.eta)s",
+          "%(info.title)s",
+        ].join("\t"),
     ];
 
     // For a single video, don't expand any playlist the URL happens to belong to.
@@ -694,26 +695,106 @@ const exported = {
     // the directory and report whatever new files the download adds.
     const before = report.snapshot(absDir);
 
-    try {
-      await execFileAsync("yt-dlp", args);
-      report.recordNewFiles(absDir, before, url);
-      return true;
-    } catch (e) {
-      if (e.code === "ENOENT") {
-        if (!warnedMissingYtDlp) {
-          warnedMissingYtDlp = true;
-          this.print(
-            "WARNING",
-            "YT-DLP",
-            "yt-dlp is not installed or not on PATH. Skipping video downloads. Install it (e.g 'brew install yt-dlp').",
-            0
-          );
-        }
-        return false;
+    const num = (s) => {
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    return await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn("yt-dlp", args, { windowsHide: true });
+      } catch (e) {
+        this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.message);
+        return resolve(false);
       }
-      this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.stderr || e.message);
-      return false;
-    }
+
+      let stderr = "";
+      let outBuf = "";
+      let currentTitle = "";
+
+      // Parse one "download:" progress-template line (tab-separated, prefixed
+      // with our CSVID sentinel) and report it. Non-matching stdout is ignored.
+      const handleLine = (line) => {
+        if (!line.startsWith("CSVID\t")) return;
+        const p = line.split("\t");
+        const index = num(p[1]);
+        const count = num(p[2]);
+        const received = num(p[3]);
+        const total = num(p[4]) ?? num(p[5]); // total, else estimate
+        const speed = num(p[6]);
+        const eta = num(p[7]);
+        const title = p.slice(8).join("\t").trim();
+        const name = title || url;
+        if (title && title !== currentTitle) {
+          currentTitle = title;
+          this.emitProgress({ scope: "video", phase: "start", name, index, count });
+        }
+        this.emitProgress({
+          scope: "video",
+          phase: "progress",
+          name,
+          received,
+          total,
+          percent: total ? (received / total) * 100 : null,
+          speed,
+          eta,
+          index,
+          count,
+        });
+      };
+
+      child.stdout.on("data", (d) => {
+        outBuf += d.toString();
+        let nl;
+        while ((nl = outBuf.indexOf("\n")) >= 0) {
+          const line = outBuf.slice(0, nl).replace(/\r$/, "");
+          outBuf = outBuf.slice(nl + 1);
+          handleLine(line);
+        }
+      });
+      child.stderr.on("data", (d) => {
+        stderr += d.toString();
+      });
+
+      child.on("error", (e) => {
+        if (e.code === "ENOENT") {
+          if (!warnedMissingYtDlp) {
+            warnedMissingYtDlp = true;
+            this.print(
+              "WARNING",
+              "YT-DLP",
+              "yt-dlp is not installed or not on PATH. Skipping video downloads. Install it (e.g 'brew install yt-dlp').",
+              0
+            );
+          }
+          return resolve(false);
+        }
+        this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.message);
+        resolve(false);
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) {
+          this.emitProgress({
+            scope: "video",
+            phase: "done",
+            name: currentTitle || url,
+          });
+          report.recordNewFiles(absDir, before, url);
+          return resolve(true);
+        }
+        // ENOENT is handled by the 'error' handler above (no 'close' with 0).
+        this.print(
+          "WARNING",
+          "YT-DLP",
+          `Could not download ${url}`,
+          0,
+          stderr.trim() || `yt-dlp exited with code ${code}`
+        );
+        resolve(false);
+      });
+    });
   },
 
   /**
@@ -948,6 +1029,72 @@ const exported = {
    */
   setPrinter(fn) {
     this.printer = fn || null;
+  },
+
+  // Optional sink for download progress. When set (via setProgressSink), the
+  // file/video downloaders report progress to it so a front-end can render a
+  // bar. Each event: { scope: "file"|"video", phase: "start"|"progress"|"done",
+  // name, received, total, percent, speed, eta, index, count }. null = ignored.
+  progressSink: null,
+
+  /** Routes download-progress events to `fn` (or disables them when null). */
+  setProgressSink(fn) {
+    this.progressSink = fn || null;
+  },
+
+  /** Emits one download-progress event; never lets a UI error break a download. */
+  emitProgress(evt) {
+    if (!this.progressSink) return;
+    try {
+      this.progressSink(evt);
+    } catch (e) {
+      /* a failing progress sink must not abort the download */
+    }
+  },
+
+  /**
+   * Streams a fetch response body to `filePath`, reporting byte progress. Byte
+   * counting on 'data' runs alongside the pipe (it doesn't consume the stream).
+   * @param {object} response node-fetch response (with a readable `body`)
+   * @param {string} filePath destination path
+   * @param {string} name human-readable name for progress events
+   * @param {string} [scope="file"] progress scope label
+   */
+  async streamToFile(response, filePath, name, scope = "file") {
+    const total = Number(response.headers.get("content-length")) || 0;
+    let received = 0;
+    let lastEmit = 0;
+    this.emitProgress({ scope, phase: "start", name, received: 0, total });
+    await new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(filePath);
+      response.body.on("error", reject);
+      response.body.on("data", (chunk) => {
+        received += chunk.length;
+        const now = Date.now();
+        if (now - lastEmit >= 150) {
+          lastEmit = now;
+          this.emitProgress({
+            scope,
+            phase: "progress",
+            name,
+            received,
+            total,
+            percent: total ? (received / total) * 100 : null,
+          });
+        }
+      });
+      fileStream.on("error", reject);
+      fileStream.on("finish", resolve);
+      response.body.pipe(fileStream);
+    });
+    this.emitProgress({
+      scope,
+      phase: "done",
+      name,
+      received,
+      total,
+      percent: total ? 100 : null,
+    });
   },
 
   print(type, name, message, indent = 0, additional = null) {
