@@ -1020,6 +1020,29 @@ const exported = {
   },
 
   /**
+   * Creates a directory, avoiding collisions with existing ones. Sanitized
+   * names frequently repeat (e.g. several untitled sections, or two files with
+   * the same name), and a bare mkdirSync throws EEXIST on the second. When the
+   * desired path is taken, appends " (2)", " (3)", ... until a free name is
+   * found. Missing parent directories are created as needed.
+   * @param {string} desiredPath the directory path to create
+   * @returns {string} the path actually created (may carry a " (n)" suffix)
+   */
+  mkUniqueDir(desiredPath) {
+    const parent = path.dirname(desiredPath);
+    const base = path.basename(desiredPath);
+    fs.mkdirSync(parent, { recursive: true });
+    let candidate = desiredPath;
+    let n = 2;
+    while (fs.existsSync(candidate)) {
+      candidate = path.join(parent, `${base} (${n})`);
+      n++;
+    }
+    fs.mkdirSync(candidate);
+    return candidate;
+  },
+
+  /**
    * Scrapes sections of a course
    * @param {Browser} browser puppeteer browser
    * @param {Object} cookies cookies to use
@@ -1039,7 +1062,9 @@ const exported = {
     scrapingFunction
   ) {
     console.log(`=== SCRAPING ${this.types[type].p.toUpperCase()} ===`);
-    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`);
+    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`, {
+      recursive: true,
+    });
     const page = await this.newPage(
       browser,
       cookies,
@@ -1089,9 +1114,13 @@ const exported = {
           `STARTING SCRAPING`,
           0
         );
-        fs.mkdirSync(
+        // Section names are sanitized and can collide (e.g. several
+        // "untitled" sections). Create a unique directory and adopt its name
+        // so the scrapingFunction below writes into the same folder.
+        const sectionDir = this.mkUniqueDir(
           `${dir}/${this.types[type].p.toUpperCase()}/${section.name}`
         );
+        section.name = path.basename(sectionDir);
         for (const link of section.links) {
           try {
             let pDownloads = await scrapingFunction(

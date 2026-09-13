@@ -1,17 +1,17 @@
-import fs from "fs";
 import helpers from "../helpers.js";
 
 async function scrapeQuiz(browser, cookies, dir, sectionName, quiz) {
   helpers.print("NOTE", `QUIZ '${quiz.name}'`, `STARTING SCRAPING`, 1);
-  fs.mkdirSync(`${dir}/QUIZZES/${sectionName}/${quiz.name}`);
+  const quizDir = helpers.mkUniqueDir(
+    `${dir}/QUIZZES/${sectionName}/${quiz.name}`
+  );
 
   const page = await helpers.newPage(browser, cookies, quiz.url);
   await page.pdf({
-    path: `${dir}/QUIZZES/${sectionName}/${quiz.name}/QUIZ.pdf`,
+    path: `${quizDir}/QUIZ.pdf`,
     format: "Letter",
   });
 
-  const quizDir = `${dir}/QUIZZES/${sectionName}/${quiz.name}`;
   let pDownloads = [];
   try {
     pDownloads = await helpers.searchAndDownload(
