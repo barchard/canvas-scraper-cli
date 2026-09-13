@@ -718,6 +718,42 @@ const exported = {
       let outBuf = "";
       let currentTitle = "";
 
+      // Interleaved transcription: as each media file finishes downloading, queue
+      // it for transcription (running sequentially in the background) so it
+      // overlaps the next download instead of waiting for the whole folder. A
+      // file is considered finished once it exists with no temp sibling and its
+      // size is stable across two sweeps (so we never grab it mid-merge/move).
+      const MEDIA_RE = /\.(mp4|m4a|mkv|webm|mp3|wav)$/i;
+      const queued = new Set();
+      const sizes = new Map();
+      let transcribeChain = Promise.resolve();
+      const sweep = () => {
+        if (!transcribeCmd || !filesBefore) return;
+        for (const f of this.listFilesRecursive(absDir)) {
+          if (queued.has(f) || filesBefore.has(f) || !MEDIA_RE.test(f)) continue;
+          let size;
+          try {
+            size = fs.statSync(f).size;
+          } catch (e) {
+            continue;
+          }
+          if (size <= 0) continue;
+          if (sizes.get(f) !== size) {
+            sizes.set(f, size); // record; enqueue only once it's stable
+            continue;
+          }
+          queued.add(f);
+          transcribeChain = transcribeChain.then(() =>
+            this.runTranscribeOne(transcribeCmd, f, queued.size, null)
+          );
+        }
+      };
+      const sweepTimer =
+        transcribeCmd && filesBefore ? setInterval(sweep, 1500) : null;
+      const stopSweep = () => {
+        if (sweepTimer) clearInterval(sweepTimer);
+      };
+
       // Parse one "download:" progress-template line (tab-separated, prefixed
       // with our CSVID sentinel) and report it. Non-matching stdout is ignored.
       const handleLine = (line) => {
@@ -763,6 +799,7 @@ const exported = {
       });
 
       child.on("error", (e) => {
+        stopSweep();
         if (e.code === "ENOENT") {
           if (!warnedMissingYtDlp) {
             warnedMissingYtDlp = true;
@@ -780,22 +817,22 @@ const exported = {
       });
 
       child.on("close", async (code) => {
+        stopSweep();
+        this.emitProgress({
+          scope: "video",
+          phase: "done",
+          name: currentTitle || url,
+        });
+        // Catch any files finished right before exit (two passes satisfy the
+        // size-stability check for the last file), then let all queued
+        // transcriptions run to completion.
+        if (transcribeCmd && filesBefore) {
+          sweep();
+          sweep();
+          await transcribeChain;
+        }
         if (code === 0) {
-          this.emitProgress({
-            scope: "video",
-            phase: "done",
-            name: currentTitle || url,
-          });
           report.recordNewFiles(absDir, before, url);
-          // Transcribe the newly downloaded media (with progress) if enabled.
-          if (transcribeCmd && filesBefore) {
-            const newMedia = this.listFilesRecursive(absDir).filter(
-              (f) => !filesBefore.has(f) && /\.(mp4|m4a|mkv|webm|mp3|wav)$/i.test(f)
-            );
-            if (newMedia.length) {
-              await this.runTranscription(transcribeCmd, newMedia);
-            }
-          }
           return resolve(true);
         }
         // ENOENT is handled by the 'error' handler above (no 'close' with 0).
@@ -834,19 +871,10 @@ const exported = {
   },
 
   /**
-   * Runs the configured transcription command once per file, reporting progress.
-   * Mirrors yt-dlp's --exec: "{}" in the command is replaced with the file path
-   * (quoted); if absent, the path is appended.
-   * @param {string} cmd the transcribeCommand from config.json
-   * @param {Array<string>} files media files to transcribe
+   * Runs one transcription, emitting scope:"transcribe" progress events. Mirrors
+   * yt-dlp's --exec: "{}" in the command is replaced with the file path (quoted);
+   * if absent, the path is appended.
    */
-  async runTranscription(cmd, files) {
-    for (let i = 0; i < files.length; i++) {
-      await this.runTranscribeOne(cmd, files[i], i + 1, files.length);
-    }
-  },
-
-  /** Runs one transcription, emitting scope:"transcribe" progress events. */
   runTranscribeOne(cmd, file, index, count) {
     return new Promise((resolve) => {
       const name = path.basename(file);

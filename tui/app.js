@@ -47,6 +47,52 @@ function progressBar(percent, width = 20) {
   return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
+/**
+ * Renders a two-line progress block for one download or transcription event.
+ * Downloads show bytes/speed/ETA; transcriptions show elapsed time (and a
+ * percentage bar when the transcriber reports one, else "transcribing…").
+ */
+function progressBlock(p) {
+  const isTranscribe = p.scope === "transcribe";
+  const icon = isTranscribe ? "📝" : p.scope === "video" ? "🎬" : "⬇";
+  const seq =
+    p.count && p.count > 1 ? ` [${p.index || "?"}/${p.count}]` : "";
+  const bar = progressBar(p.percent);
+  const pct = p.percent != null ? `${Math.floor(p.percent)}%` : "";
+
+  let meta;
+  if (isTranscribe) {
+    meta = p.elapsed != null ? fmtEta(p.elapsed) : "";
+  } else {
+    const size = p.total
+      ? `${fmtBytes(p.received)}/${fmtBytes(p.total)}`
+      : p.received != null
+      ? fmtBytes(p.received)
+      : "";
+    const speed = p.speed ? `${fmtBytes(p.speed)}/s` : "";
+    const eta = p.eta != null ? `ETA ${fmtEta(p.eta)}` : "";
+    meta = [size, speed, eta].filter(Boolean).join("  ");
+  }
+
+  const idleLabel = isTranscribe ? "transcribing…" : "downloading…";
+  return h(
+    Box,
+    { flexDirection: "column" },
+    h(
+      Text,
+      { color: isTranscribe ? "cyan" : "magenta", wrap: "truncate-end" },
+      `${icon}${seq} ${p.name || ""}`
+    ),
+    h(
+      Text,
+      null,
+      bar ? h(Text, { color: "green" }, bar) : h(Text, { dimColor: true }, idleLabel),
+      h(Text, null, pct ? `  ${pct}` : ""),
+      meta ? h(Text, { dimColor: true }, `  ${meta}`) : null
+    )
+  );
+}
+
 /** Flattens a helpers.print record (and any attached error) into text lines. */
 function recordToLines(rec) {
   const lines = [rec.line || `[${rec.type}] ${rec.name} | ${rec.message}`];
@@ -238,6 +284,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
   const [logs, setLogs] = React.useState([]);
   const [courses, setCourses] = React.useState([]);
   const [download, setDownload] = React.useState(null);
+  const [transcribe, setTranscribe] = React.useState(null);
   const [status, setStatus] = React.useState({
     label: "Starting…", index: 0, total: 0, course: "", phase: "",
   });
@@ -398,14 +445,22 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
             course: evt.name || evt.url, phase: "",
           }));
           setDownload(null);
+          setTranscribe(null);
         } else if (evt.type === "phase") {
           setStatus((s) => ({ ...s, phase: evt.label }));
           setDownload(null);
+          setTranscribe(null);
         } else if (evt.type === "download") {
-          // Keep the last video frame visible between playlist items; clear when
-          // a file or a transcription finishes (they'd otherwise linger stale).
-          if (evt.phase === "done" && evt.scope !== "video") setDownload(null);
-          else setDownload(evt);
+          // Download and transcription run concurrently, so each gets its own
+          // slot. Videos keep their last frame between playlist items; files and
+          // finished transcriptions clear so they don't linger stale.
+          if (evt.scope === "transcribe") {
+            setTranscribe(evt.phase === "done" ? null : evt);
+          } else if (evt.phase === "done" && evt.scope === "file") {
+            setDownload(null);
+          } else {
+            setDownload(evt);
+          }
         }
       },
     };
@@ -612,52 +667,12 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         )
       : null;
 
-  // Live download/transcription progress (mainly the big Panopto/video jobs,
-  // which are otherwise a single opaque line).
-  let downloadLines = null;
-  if (!done && step === "scraping" && download) {
-    const isTranscribe = download.scope === "transcribe";
-    const icon = isTranscribe ? "📝" : download.scope === "video" ? "🎬" : "⬇";
-    const seq =
-      download.count && download.count > 1
-        ? ` [${download.index || "?"}/${download.count}]`
-        : "";
-    const bar = progressBar(download.percent);
-    const pct = download.percent != null ? `${Math.floor(download.percent)}%` : "";
-
-    let meta;
-    if (isTranscribe) {
-      // Transcribers rarely report bytes; show elapsed time (and % when known).
-      meta = download.elapsed != null ? fmtEta(download.elapsed) : "";
-    } else {
-      const size = download.total
-        ? `${fmtBytes(download.received)}/${fmtBytes(download.total)}`
-        : download.received != null
-        ? fmtBytes(download.received)
-        : "";
-      const speed = download.speed ? `${fmtBytes(download.speed)}/s` : "";
-      const eta = download.eta != null ? `ETA ${fmtEta(download.eta)}` : "";
-      meta = [size, speed, eta].filter(Boolean).join("  ");
-    }
-
-    const idleLabel = isTranscribe ? "transcribing…" : "downloading…";
-    downloadLines = h(
-      Box,
-      { flexDirection: "column" },
-      h(
-        Text,
-        { color: isTranscribe ? "cyan" : "magenta", wrap: "truncate-end" },
-        `${icon}${seq} ${download.name || ""}`
-      ),
-      h(
-        Text,
-        null,
-        bar ? h(Text, { color: "green" }, bar) : h(Text, { dimColor: true }, idleLabel),
-        h(Text, null, pct ? `  ${pct}` : ""),
-        meta ? h(Text, { dimColor: true }, `  ${meta}`) : null
-      )
-    );
-  }
+  // Live download and transcription progress (they run concurrently, so each
+  // shows on its own line). Otherwise the big Panopto/video jobs are a single
+  // opaque line.
+  const showProgress = !done && step === "scraping";
+  const downloadLines = showProgress && download ? progressBlock(download) : null;
+  const transcribeLines = showProgress && transcribe ? progressBlock(transcribe) : null;
 
   const showLogs =
     done || ["login", "fetchCourses", "scraping"].includes(step);
@@ -697,6 +712,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     promptLine,
     courseLine,
     downloadLines,
+    transcribeLines,
     logBox,
     summaryBox
   );
