@@ -20,7 +20,7 @@ To send other providers through `yt-dlp`, add their hostnames to the `videoHosts
 
 ## Getting Started
 
-You'll first need to get the cookies for your current Canvas session to allow the scraper to have credentials to your Canvas. This needs to be done in JSON format (an example can be found in cookies-example.json).
+You'll first need to get the cookies for your current Canvas session to allow the scraper to have credentials to your Canvas. The cookies file can be either a **JSON array** of cookie objects (an example can be found in cookies-example.json) or a **Netscape HTTP Cookie File** (the `cookies.txt` format exported by many extensions and used by `curl`/`yt-dlp`). The scraper auto-detects which format the file is in, so either works.
 
 The easiest way to do this is by logging into Canvas in your browser and using an extension to export your current cookies (e.g. [CookieManager](https://chromewebstore.google.com/detail/cookiemanager-cookie-edit/hdhngoamekjhmnpenphenpaiindoinpo) for Chrome).
 
@@ -32,7 +32,7 @@ There is **no separate Panopto cookies file**. The scraper uses one cookies file
 
 1. In the same browser, open and sign in to your Panopto site (e.g. `https://<your-org>.hosted.panopto.com`).
 2. Using CookieManager (or your cookie-export extension), export the cookies for the Panopto domain.
-3. Open your cookies file — it is a single JSON array of cookie objects (see `cookies-example.json`). Append the exported Panopto cookie objects to that same array, alongside your Canvas cookies, and save.
+3. Open your cookies file and add the exported Panopto cookies alongside your Canvas cookies, then save. For a JSON file (see `cookies-example.json`) append the Panopto cookie objects to the array; for a Netscape `cookies.txt` file append the Panopto cookie lines.
 
 **Name and location:** Panopto has no special filename or path — reuse the cookies file you already pass to the scraper. By default that is `cookies.json` in the directory you run the scraper from; if you pass `-c <path>` (or set it in the wizard), put the Panopto cookies in that file. Canvas and Panopto entries simply live side by side in the same array, for example:
 
@@ -78,7 +78,7 @@ Arguments:
 
 Options:
   -o, --output <dir_name>  output directory name (default: "courses/course")
-  -c, --cookies <path>     path to cookies file (default: "cookies.json")
+  -c, --cookies <path>     path to cookies file, JSON or Netscape format (default: "cookies.json")
   -a                       scrape assignments (default: false)
   -m                       scrape modules (default: false)
   -q                       scrape quizzes (default: false)
@@ -88,10 +88,18 @@ Options:
   --report                 write a report.csv listing every downloaded asset (default: false)
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
+  --all                    scrape all content types (-a -m -q -v -s)
+  --tui                    run with the interactive terminal UI (Ink)
   -h, --help               display help for command
 ```
 
 Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
+
+### Terminal UI (`--tui`)
+
+Add `--tui` (or run `npm run tui`) to drive a scrape from an [Ink](https://github.com/vadimdemedes/ink) terminal UI instead of a wall of log lines: a live spinner, the current course and phase (`3/12 — Modules`), a scrolling pane of the most recent log messages, and a final summary. It accepts all the same flags — e.g. `node index.js https://<school_domain> --all --tui` — and falls back to the interactive wizard when no URL is given.
+
+The scraping logic itself lives in a UI-agnostic core (`core/scrape.js`, `runScrape(url, options, hooks)`); the CLI, the TUI, and a future GUI are all thin front-ends over it, so the three stay in sync automatically.
 
 ### Asset report (`--report`)
 

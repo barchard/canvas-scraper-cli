@@ -1,4 +1,3 @@
-import fs from "fs";
 import helpers from "../helpers.js";
 import aHelpers from "./helpers.js";
 
@@ -16,8 +15,9 @@ async function scrapeAssignment(
     1
   );
   // create assignment directory and open page
-  const ASSIGNMENT_PATH = `${dir}/ASSIGNMENTS/${sectionName}/${assignment.name} (${assignment.grade})`;
-  fs.mkdirSync(ASSIGNMENT_PATH);
+  const ASSIGNMENT_PATH = helpers.mkUniqueDir(
+    `${dir}/ASSIGNMENTS/${sectionName}/${assignment.name} (${assignment.grade})`
+  );
   const page = await helpers.newPage(browser, cookies, assignment.url);
 
   // scrape comments

@@ -1,83 +1,10 @@
 import fs from "fs";
 import { Command } from "commander";
-import puppeteer from "puppeteer";
-import http from "http";
 import inquirer from "inquirer";
 
 import helpers from "./scrapers/helpers.js";
-import scrapers from "./scrapers/index.js";
-import report from "./scrapers/report.js";
-import wiki from "./scrapers/wiki.js";
-import octarine from "./scrapers/octarine.js";
-
-/**
- * Parses the target URL into a Canvas domain and (optional) course id.
- * - "https://<domain>"                    -> all of the user's courses
- * - "https://<domain>/courses/<course_id>" -> a single course
- */
-function parseTarget(url) {
-  let m = url.match(/^https:\/\/([^/]+)\/?$/);
-  if (m) return { domain: `https://${m[1]}`, courseId: null };
-
-  m = url.match(/^https:\/\/([^/]+)\/courses\/([^/?#]+)/);
-  if (m) return { domain: `https://${m[1]}`, courseId: m[2] };
-
-  helpers.print(
-    "ERROR",
-    "URL",
-    "Invalid URL. Use 'https://<school_domain>' for all your courses, or 'https://<school_domain>/courses/<course_id>' for a single course. Exiting...",
-    0
-  );
-  process.exit(1);
-}
-
-/**
- * Scrapes one course into `courseDir` (homepage PDF + the selected sections).
- */
-async function scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape, courseName) {
-  console.log(`*** SCRAPING COURSE FROM ${courseUrl} ***`);
-  fs.mkdirSync(courseDir, { recursive: true });
-
-  // Attribute every asset downloaded below to this course in the --report CSV.
-  report.setCourse(courseName, courseUrl);
-
-  const page = await helpers.newPage(browser, cookies, courseUrl);
-  if (page.status !== 200) {
-    helpers.print(
-      "ERROR",
-      "HOMEPAGE",
-      `Could not load homepage for ${courseUrl}. Skipping...`,
-      0,
-      http.STATUS_CODES[page.status]
-    );
-    await page.close().catch(() => {});
-    return;
-  }
-  // When no name was passed (single-course mode), fall back to the homepage title.
-  if (!courseName) {
-    const title = await page.title().catch(() => "");
-    if (title) report.setCourse(title.trim(), courseUrl);
-  }
-  await page.pdf({ path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
-  await page.close().catch(() => {});
-
-  if (toScrape.a) await scrapers.scrapeAssignments(browser, cookies, courseUrl, courseDir);
-  if (toScrape.m) await scrapers.scrapeModules(browser, cookies, courseUrl, courseDir);
-  if (toScrape.q) await scrapers.scrapeQuizzes(browser, cookies, courseUrl, courseDir);
-  if (toScrape.v) await scrapers.scrapeVideos(browser, cookies, courseUrl, courseDir);
-  if (toScrape.s) await scrapers.scrapeStudyNet(browser, cookies, courseUrl, courseDir);
-
-  console.log(`*** FINISHED SCRAPING ${courseUrl} ***`);
-}
-
-function readJSON(path, varName) {
-  try {
-    return JSON.parse(fs.readFileSync(path));
-  } catch (e) {
-    helpers.print("ERROR", varName, "Could not read cookies. Exiting...", 0, e);
-    process.exit(1);
-  }
-}
+import { runScrape } from "./core/scrape.js";
+import { renderTui } from "./tui/app.js";
 
 const argDef = [
   {
@@ -108,13 +35,11 @@ const flagDef = [
     message: "Please enter the path to the cookies file:",
     default: "cookies.json",
     flags: "-c, --cookies <path>",
-    description: "path to cookies file",
+    description: "path to cookies file (JSON or Netscape HTTP Cookie File)",
     onlyShowValid: true,
     validate: (input) => {
       if (!fs.existsSync(input))
         return "File does not exist. Please enter a valid path.";
-      if (!input.toLowerCase().endsWith("json"))
-        return "Invalid file format. Please enter a path to a JSON file.";
       return true;
     },
   },
@@ -212,6 +137,7 @@ flagDef.forEach((flag) =>
 );
 
 program.option("--all", "scrape all content types (-a -m -q -v -s)");
+program.option("--tui", "run with the interactive terminal UI (Ink)");
 
 program.action(async (url, options) => {
   if (!url) {
@@ -222,175 +148,18 @@ program.action(async (url, options) => {
     Object.assign(options, answers);
   }
 
-  // url parsing -> domain + optional course id
-  const { domain, courseId } = parseTarget(url);
-  // read cookies
-  const cookies = readJSON(options.cookies, "cookies");
-  process.env.config = JSON.stringify(readJSON("config.json", "config"));
-
-  // opt-in transcription of downloaded videos (via config.json transcribeCommand)
-  if (options.t) {
-    process.env.transcribe = "true";
-    if (!JSON.parse(process.env.config).transcribeCommand) {
-      helpers.print(
-        "WARNING",
-        "TRANSCRIBE",
-        'Transcription enabled (-t) but "transcribeCommand" is empty in config.json. Videos will not be transcribed.',
-        0
-      );
-    }
+  // --tui renders the run in an Ink terminal UI; otherwise stream to the console.
+  if (options.tui) {
+    await renderTui(url, options);
+    return;
   }
 
-  // opt-in CSV report of every downloaded asset (written to <output>/report.csv).
-  // --wiki and --octarine also need the recorder on: they use the source URLs
-  // to link each catalog entry back to where it came from.
-  if (options.report || options.wiki || options.octarine) report.enable();
-
-  console.log(`FLAGS: ${JSON.stringify(options)}`);
-
-  // create (fresh) output directory
-  const dir = options.output;
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(dir, { recursive: true });
-
-  // figure out what to scrape (t is a separate modifier, handled above)
-  const toScrape = { a: options.a, m: options.m, q: options.q, v: options.v, s: options.s };
-  if (options.all) {
-    for (const key in toScrape) toScrape[key] = true;
+  try {
+    await runScrape(url, options);
+  } catch (e) {
+    helpers.print("ERROR", "SCRAPE", e.message || String(e), 0);
+    process.exit(1);
   }
-  if (Object.values(toScrape).every((v) => !v)) {
-    helpers.print("NOTE", "FLAGS", "No flags set. Scraping all...", 0);
-    for (const key in toScrape) toScrape[key] = true;
-  }
-
-  const browser = await puppeteer.launch({ headless: "new" });
-
-  if (courseId) {
-    // single course -> output straight into `dir`
-    await scrapeCourse(browser, cookies, `${domain}/courses/${courseId}`, dir, toScrape);
-  } else {
-    // bare domain -> every course, each into its own subfolder of `dir`
-    helpers.print(
-      "NOTE",
-      "COURSES",
-      `No course id in URL — scraping all your courses on ${domain}...`,
-      0
-    );
-    const courses = await helpers.listCourses(domain, cookies, browser);
-    if (!courses.length) {
-      helpers.print(
-        "WARNING",
-        "COURSES",
-        "No courses found. Check that your cookies are valid and you have active enrollments.",
-        0
-      );
-    } else {
-      helpers.print("NOTE", "COURSES", `Found ${courses.length} course(s).`, 0);
-      for (const c of courses) {
-        const courseDir = `${dir}/${helpers.stripInvalid(`${c.name} (${c.id})`)}`;
-        try {
-          await scrapeCourse(
-            browser,
-            cookies,
-            `${domain}/courses/${c.id}`,
-            courseDir,
-            toScrape,
-            c.name
-          );
-        } catch (e) {
-          helpers.print(
-            "ERROR",
-            "COURSE",
-            `Could not scrape ${c.name} (${c.id})`,
-            0,
-            e
-          );
-        }
-      }
-    }
-  }
-
-  browser.close();
-
-  if (options.report) {
-    try {
-      const reportPath = `${dir}/report.csv`;
-      const count = report.write(reportPath);
-      helpers.print(
-        "NOTE",
-        "REPORT",
-        `Wrote ${count} asset(s) to ${reportPath}`,
-        0
-      );
-    } catch (e) {
-      helpers.print("ERROR", "REPORT", "Could not write report.csv", 0, e);
-    }
-
-    try {
-      const skippedPath = `${dir}/report-skipped.csv`;
-      const skippedCount = report.writeSkipped(skippedPath);
-      if (skippedCount > 0) {
-        helpers.print(
-          "NOTE",
-          "REPORT",
-          `Wrote ${skippedCount} skipped/failed download(s) to ${skippedPath}`,
-          0
-        );
-      }
-    } catch (e) {
-      helpers.print("ERROR", "REPORT", "Could not write report-skipped.csv", 0, e);
-    }
-  }
-
-  // opt-in reorganization into the LLM Wiki layout (raw/ + index.md + wiki/).
-  // Runs last so it can sweep everything else the run produced into raw/.
-  if (options.wiki) {
-    try {
-      const { sources } = wiki.build(dir, report.rows);
-      helpers.print(
-        "NOTE",
-        "WIKI",
-        `Organized ${sources} source(s) into ${dir}/raw and wrote ${dir}/index.md`,
-        0
-      );
-    } catch (e) {
-      helpers.print("ERROR", "WIKI", "Could not organize output as an LLM Wiki", 0, e);
-    }
-  }
-
-  // opt-in reorganization into an Octarine workspace (.attachments/ + notes).
-  // --wiki and --octarine are alternative layouts of the same files; if both
-  // are set, --wiki already claimed the output, so skip Octarine.
-  if (options.octarine) {
-    if (options.wiki) {
-      helpers.print(
-        "WARNING",
-        "OCTARINE",
-        "--wiki and --octarine are alternative layouts; --wiki was applied, skipping --octarine.",
-        0
-      );
-    } else {
-      try {
-        const { sources, notes } = octarine.build(dir, report.rows);
-        helpers.print(
-          "NOTE",
-          "OCTARINE",
-          `Organized ${sources} source(s) into ${dir}/.attachments and wrote ${notes} course note(s)`,
-          0
-        );
-      } catch (e) {
-        helpers.print(
-          "ERROR",
-          "OCTARINE",
-          "Could not organize output as an Octarine workspace",
-          0,
-          e
-        );
-      }
-    }
-  }
-
-  console.log("*** DONE ***");
 });
 
 program.parse();

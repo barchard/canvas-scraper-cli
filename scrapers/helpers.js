@@ -15,6 +15,9 @@ const execFileAsync = promisify(execFile);
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
 let ytDlpCookieFile = null;
+// Cache of each course's home-page type (default_view), keyed by course URL,
+// so the redirect guard in scrapeSections queries the API at most once/course.
+const courseDefaultViewCache = new Map();
 
 const exported = {
   /**
@@ -88,14 +91,34 @@ const exported = {
       },
     });
 
+    // A non-2xx response never carries the file; bail before writing anything
+    // (e.g. an expired session yields a 401/403, or a broken link a 404).
+    if (!response.ok) {
+      report.recordFailure(url, `HTTP ${response.status}`);
+      return false;
+    }
+
     let filename = backupName;
     const contentDisposition = response.headers.get("content-disposition");
     if (contentDisposition) {
-      const match = contentDisposition.match(/filename="(.+?)"/);
-      if (match) {
-        filename = match[1];
-        filename = this.stripInvalid(filename);
+      // Servers spell the filename several ways; try each in preference order:
+      //   filename*=UTF-8''name.pdf  (RFC 5987, percent-encoded)
+      //   filename="name.pdf"        (quoted)
+      //   filename=name.pdf          (bare)
+      let extracted;
+      const star = contentDisposition.match(/filename\*=(?:[^']*''|)([^;]+)/i);
+      if (star) {
+        try {
+          extracted = decodeURIComponent(star[1].trim());
+        } catch {
+          extracted = star[1].trim();
+        }
+      } else {
+        const quoted = contentDisposition.match(/filename="([^"]+)"/i);
+        const bare = contentDisposition.match(/filename=([^;]+)/i);
+        extracted = quoted ? quoted[1] : bare ? bare[1].trim() : undefined;
       }
+      if (extracted) filename = this.stripInvalid(extracted);
     }
 
     const filePath = path.join(dir, filename);
@@ -913,8 +936,27 @@ const exported = {
    * @param {Number} indent number of indents to use
    * @param {any} additional additional information to print (e.g error stack trace)
    */
+  // Optional sink for print(). When set (via setPrinter), every print() call is
+  // forwarded to it instead of going straight to the console, so a front-end
+  // (e.g. the Ink TUI) can render log lines itself. null = default console.
+  printer: null,
+
+  /**
+   * Redirects print() output to `fn` (or back to the console when null).
+   * @param {?function} fn receives a record { type, name, message, indent,
+   *   additional, line } for each print() call.
+   */
+  setPrinter(fn) {
+    this.printer = fn || null;
+  },
+
   print(type, name, message, indent = 0, additional = null) {
-    console.log(`[${type}]${"  ".repeat(indent)} ${name} | ${message}`);
+    const line = `[${type}]${"  ".repeat(indent)} ${name} | ${message}`;
+    if (this.printer) {
+      this.printer({ type, name, message, indent, additional, line });
+      return;
+    }
+    console.log(line);
     if (additional) console.log(additional);
   },
 
@@ -943,6 +985,41 @@ const exported = {
       s: "quiz",
       p: "quizzes",
     },
+  },
+
+  /**
+   * Returns a course's home-page type ("modules", "assignments", "wiki",
+   * "syllabus", "feed", ...) from the Canvas API, or null if it can't be
+   * determined. Canvas hides a content tab from the nav when the home page IS
+   * that content (e.g. a Modules home hides the Modules tab); scrapeSections
+   * uses this to tell a legitimate home redirect from a disabled tab. Cached
+   * per course.
+   * @param {string} courseUrl e.g "https://canvas.mit.edu/courses/38628"
+   * @param {Array<object>} cookies session cookies
+   * @returns {Promise<string|null>}
+   */
+  async getCourseDefaultView(courseUrl, cookies) {
+    if (courseDefaultViewCache.has(courseUrl))
+      return courseDefaultViewCache.get(courseUrl);
+    let view = null;
+    try {
+      const apiUrl = courseUrl.replace("/courses/", "/api/v1/courses/");
+      const cookieHeader = cookies
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+      const res = await fetch(apiUrl, {
+        headers: { Cookie: cookieHeader, Accept: "application/json" },
+      });
+      if (res.ok) {
+        const course = await res.json();
+        view = course.default_view || null;
+      }
+    } catch (e) {
+      // Non-fatal: without it the guard just treats any redirect as a
+      // disabled tab, which is the safe default.
+    }
+    courseDefaultViewCache.set(courseUrl, view);
+    return view;
   },
 
   /**
@@ -1001,6 +1078,29 @@ const exported = {
   },
 
   /**
+   * Creates a directory, avoiding collisions with existing ones. Sanitized
+   * names frequently repeat (e.g. several untitled sections, or two files with
+   * the same name), and a bare mkdirSync throws EEXIST on the second. When the
+   * desired path is taken, appends " (2)", " (3)", ... until a free name is
+   * found. Missing parent directories are created as needed.
+   * @param {string} desiredPath the directory path to create
+   * @returns {string} the path actually created (may carry a " (n)" suffix)
+   */
+  mkUniqueDir(desiredPath) {
+    const parent = path.dirname(desiredPath);
+    const base = path.basename(desiredPath);
+    fs.mkdirSync(parent, { recursive: true });
+    let candidate = desiredPath;
+    let n = 2;
+    while (fs.existsSync(candidate)) {
+      candidate = path.join(parent, `${base} (${n})`);
+      n++;
+    }
+    fs.mkdirSync(candidate);
+    return candidate;
+  },
+
+  /**
    * Scrapes sections of a course
    * @param {Browser} browser puppeteer browser
    * @param {Object} cookies cookies to use
@@ -1020,7 +1120,6 @@ const exported = {
     scrapingFunction
   ) {
     console.log(`=== SCRAPING ${this.types[type].p.toUpperCase()} ===`);
-    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`);
     const page = await this.newPage(
       browser,
       cookies,
@@ -1034,8 +1133,55 @@ const exported = {
         0,
         http.STATUS_CODES[page.status]
       );
+      await page.close().catch(() => {});
       return;
     }
+
+    // A disabled course tab (e.g. Quizzes turned off) makes Canvas redirect the
+    // request to another page — usually the course home — which still returns
+    // 200. Without this guard the generic selectors would scrape that other
+    // page's content (e.g. Modules) as if it were this section.
+    //
+    // A redirect is only legitimate when the tab lands on the course home AND
+    // the home is configured to display this same content (Canvas hides, say,
+    // the Modules tab when the home page IS the modules list). Any other
+    // redirect means the tab is disabled, so skip it.
+    let finalPath;
+    try {
+      finalPath = new URL(page.url()).pathname.replace(/\/+$/, "");
+    } catch {
+      finalPath = page.url();
+    }
+    if (!finalPath.endsWith(`/${this.types[type].p}`)) {
+      let courseHomePath;
+      try {
+        courseHomePath = new URL(url).pathname.replace(/\/+$/, "");
+      } catch {
+        courseHomePath = url;
+      }
+      // default_view values that mean "the home page is this section".
+      const homeView = { module: "modules", assignment: "assignments" }[type];
+      const homeShowsThisSection =
+        finalPath === courseHomePath &&
+        homeView &&
+        (await this.getCourseDefaultView(url, cookies)) === homeView;
+      if (!homeShowsThisSection) {
+        this.print(
+          "WARNING",
+          this.types[type].p.toUpperCase(),
+          `The ${this.types[type].p} tab is disabled or redirected (landed on ${page.url()}); skipping.`,
+          0
+        );
+        await page.close().catch(() => {});
+        return;
+      }
+    }
+
+    // Only now that we know the tab is real do we create its output directory,
+    // so a disabled/redirected tab doesn't leave an empty folder behind.
+    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`, {
+      recursive: true,
+    });
 
     if (type === "assignment") {
       let submissionsURL = `${url.replace(
@@ -1070,9 +1216,13 @@ const exported = {
           `STARTING SCRAPING`,
           0
         );
-        fs.mkdirSync(
+        // Section names are sanitized and can collide (e.g. several
+        // "untitled" sections). Create a unique directory and adopt its name
+        // so the scrapingFunction below writes into the same folder.
+        const sectionDir = this.mkUniqueDir(
           `${dir}/${this.types[type].p.toUpperCase()}/${section.name}`
         );
+        section.name = path.basename(sectionDir);
         for (const link of section.links) {
           try {
             let pDownloads = await scrapingFunction(
