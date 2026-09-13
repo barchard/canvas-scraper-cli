@@ -88,14 +88,34 @@ const exported = {
       },
     });
 
+    // A non-2xx response never carries the file; bail before writing anything
+    // (e.g. an expired session yields a 401/403, or a broken link a 404).
+    if (!response.ok) {
+      report.recordFailure(url, `HTTP ${response.status}`);
+      return false;
+    }
+
     let filename = backupName;
     const contentDisposition = response.headers.get("content-disposition");
     if (contentDisposition) {
-      const match = contentDisposition.match(/filename="(.+?)"/);
-      if (match) {
-        filename = match[1];
-        filename = this.stripInvalid(filename);
+      // Servers spell the filename several ways; try each in preference order:
+      //   filename*=UTF-8''name.pdf  (RFC 5987, percent-encoded)
+      //   filename="name.pdf"        (quoted)
+      //   filename=name.pdf          (bare)
+      let extracted;
+      const star = contentDisposition.match(/filename\*=(?:[^']*''|)([^;]+)/i);
+      if (star) {
+        try {
+          extracted = decodeURIComponent(star[1].trim());
+        } catch {
+          extracted = star[1].trim();
+        }
+      } else {
+        const quoted = contentDisposition.match(/filename="([^"]+)"/i);
+        const bare = contentDisposition.match(/filename=([^;]+)/i);
+        extracted = quoted ? quoted[1] : bare ? bare[1].trim() : undefined;
       }
+      if (extracted) filename = this.stripInvalid(extracted);
     }
 
     const filePath = path.join(dir, filename);
