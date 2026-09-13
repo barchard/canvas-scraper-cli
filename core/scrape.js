@@ -1,7 +1,7 @@
 import fs from "fs";
-import puppeteer from "puppeteer";
 import http from "http";
 
+import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
 import scrapers from "../scrapers/index.js";
 import report from "../scrapers/report.js";
@@ -136,26 +136,6 @@ export function readCookies(path) {
   return cookies;
 }
 
-/**
- * Launches the headless browser. Prefers the locally installed Google Chrome
- * (the "chrome" channel) because Puppeteer's bundled Chromium is pinned to an
- * older build that crashes on launch under newer macOS releases. If no local
- * Chrome is installed, falls back to the bundled browser.
- */
-async function launchBrowser() {
-  try {
-    return await puppeteer.launch({ headless: "new", channel: "chrome" });
-  } catch (e) {
-    helpers.print(
-      "NOTE",
-      "BROWSER",
-      "Local Google Chrome not found; using Puppeteer's bundled browser.",
-      0
-    );
-    return await puppeteer.launch({ headless: "new" });
-  }
-}
-
 /** Resolves which content types to scrape from the options (--all / defaults). */
 function resolveToScrape(options) {
   const toScrape = {
@@ -274,6 +254,12 @@ export async function runScrape(url, options, hooks = {}) {
   // run, then restore whatever was there before (so nested/repeat runs are safe).
   const prevPrinter = helpers.printer;
   if (hooks.onLog) helpers.setPrinter((rec) => hooks.onLog(rec));
+
+  // Route download progress to the front-end. With a UI (onProgress) we forward
+  // structured events; on the plain CLI we print throttled milestone lines for
+  // videos so a big download isn't silent.
+  const prevProgressSink = helpers.progressSink;
+  helpers.setProgressSink(makeProgressSink(hooks, onProgress));
 
   let browser;
   try {
@@ -427,7 +413,62 @@ export async function runScrape(url, options, hooks = {}) {
   } finally {
     if (browser) await browser.close().catch(() => {});
     helpers.setPrinter(prevPrinter);
+    helpers.setProgressSink(prevProgressSink);
   }
+}
+
+/** Formats a byte count as a short human-readable string (e.g. "1.4 GB"). */
+function fmtBytes(n) {
+  if (n == null) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * Builds the download-progress sink for runScrape. With a UI it forwards each
+ * event as `onProgress({ type: "download", ... })`. On the plain CLI (no UI) it
+ * prints throttled milestone lines for videos so a large download isn't silent.
+ */
+function makeProgressSink(hooks, onProgress) {
+  if (hooks.onProgress) {
+    return (evt) => onProgress({ type: "download", ...evt });
+  }
+  // Console fallback: milestone lines for videos and transcriptions (plain files
+  // are quick, so they stay silent). Progress prints at ~10% steps.
+  const lastPctByName = new Map();
+  return (evt) => {
+    if (evt.scope !== "video" && evt.scope !== "transcribe") return;
+    const label = evt.scope === "transcribe" ? "TRANSCRIBE" : "YT-DLP";
+    const where = evt.count ? ` (${evt.index || "?"}/${evt.count})` : "";
+
+    if (evt.phase === "start") {
+      const icon = evt.scope === "transcribe" ? "📝" : "⬇";
+      helpers.print("NOTE", label, `${icon} ${evt.name}${where}`, 1);
+      lastPctByName.set(evt.name, -1);
+      return;
+    }
+    if (evt.phase === "done") {
+      lastPctByName.delete(evt.name);
+      return;
+    }
+    if (evt.percent == null) return; // indeterminate (e.g. a quiet transcriber)
+    const bucket = Math.floor(evt.percent / 10) * 10;
+    if (bucket > (lastPctByName.get(evt.name) ?? -1)) {
+      lastPctByName.set(evt.name, bucket);
+      const size =
+        evt.scope === "video" && evt.total
+          ? ` (${fmtBytes(evt.received)}/${fmtBytes(evt.total)})`
+          : "";
+      const speed = evt.scope === "video" && evt.speed ? ` @ ${fmtBytes(evt.speed)}/s` : "";
+      helpers.print("NOTE", label, `  ${bucket}%${size}${speed} — ${evt.name}`, 1);
+    }
+  };
 }
 
 export default { runScrape, parseTarget, readJSON };

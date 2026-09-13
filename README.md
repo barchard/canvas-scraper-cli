@@ -22,13 +22,37 @@ To send other providers through `yt-dlp`, add their hostnames to the `videoHosts
 
 You'll first need to get the cookies for your current Canvas session to allow the scraper to have credentials to your Canvas. The cookies file can be either a **JSON array** of cookie objects (an example can be found in cookies-example.json) or a **Netscape HTTP Cookie File** (the `cookies.txt` format exported by many extensions and used by `curl`/`yt-dlp`). The scraper auto-detects which format the file is in, so either works.
 
-The easiest way to do this is by logging into Canvas in your browser and using an extension to export your current cookies (e.g. [CookieManager](https://chromewebstore.google.com/detail/cookiemanager-cookie-edit/hdhngoamekjhmnpenphenpaiindoinpo) for Chrome).
+#### Recommended: log in interactively
+
+The easiest way is to let the scraper capture the cookies for you. Run:
+
+```
+node index.js login https://<school_domain>
+```
+
+A Chrome window opens at your Canvas domain. Log in normally — single sign-on and two-factor prompts all work, because you're logging in yourself. If you want video downloads, open and sign in to your Panopto site in the same window too. Then return to the terminal and press **Enter**: the scraper reads your session cookies straight out of the browser (including `HttpOnly` cookies like `canvas_session`, which extensions that read `document.cookie` can't see) and writes them to `cookies.json`. No extension and no hand-merging required.
+
+By default the cookies are written to `cookies.json`; pass `-c <path>` to write elsewhere (use the same path you'll pass the scraper). This is a **fresh** login each time — no browser profile is saved, so you log in again whenever your cookies expire.
+
+You can also fold the login into a scrape in one shot with the `--login` flag — it captures cookies first, then scrapes:
+
+```
+node index.js --login https://<school_domain>/courses/<course_id> --all
+```
+
+#### Alternative: export with a browser extension
+
+If you'd rather not use the interactive flow, log into Canvas in your browser and use an extension to export your current cookies (e.g. [CookieManager](https://chromewebstore.google.com/detail/cookiemanager-cookie-edit/hdhngoamekjhmnpenphenpaiindoinpo) for Chrome), saving them to `cookies.json`.
 
 ### Cookies for Panopto (and other login-gated videos)
 
 Panopto support is built in — `panopto.com` and its subdomains (e.g. `*.hosted.panopto.com`) are already recognized, so you **do not** need to change `config.json` to download Panopto videos.
 
-There is **no separate Panopto cookies file**. The scraper uses one cookies file for everything: it authenticates Canvas with it and also converts it into the cookie file it hands to `yt-dlp`. To download login-gated Panopto videos, that same file must also contain your Panopto session cookies:
+There is **no separate Panopto cookies file**. The scraper uses one cookies file for everything: it authenticates Canvas with it and also converts it into the cookie file it hands to `yt-dlp`. To download login-gated Panopto videos, that same file must also contain your Panopto session cookies.
+
+If you used the interactive `login` flow above, this is automatic: just open and sign in to your Panopto site in the same browser window before you press Enter — the capture reads every cookie in the browser, so Canvas and Panopto are saved together in one file.
+
+If you're exporting cookies with an extension instead, add the Panopto cookies to the file by hand:
 
 1. In the same browser, open and sign in to your Panopto site (e.g. `https://<your-org>.hosted.panopto.com`).
 2. Using CookieManager (or your cookie-export extension), export the cookies for the Panopto domain.
@@ -66,6 +90,14 @@ After, you can simply run the entry file directly...
 
 `node index.js [options] <url>`
 
+### Guided setup (no arguments)
+
+Not sure about the flags? Just run it with no arguments:
+
+`node index.js`
+
+This starts an interactive wizard in the same [Ink](https://github.com/vadimdemedes/ink) terminal UI as `--tui` (navigate with the arrow keys, Space to toggle checkboxes, Enter to confirm) and walks you through the whole run: it asks for your Canvas URL, offers to **log you in** (opening a browser to capture your cookies — see [Getting Started](#getting-started)) or reuse an existing cookies file, lets you choose **what to scrape** (assignments / modules / quizzes / videos / study.net), and — if you gave a school domain rather than a single course URL — fetches your enrolled courses so you can **pick one course or scrape them all**. Finally it asks for the output directory and any extras (report / wiki / octarine / transcribe), then runs the scrape — login progress and the scrape itself stream in the same UI.
+
 ## Usage
 
 ```
@@ -90,7 +122,12 @@ Options:
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
   --all                    scrape all content types (-a -m -q -v -s)
   --tui                    run with the interactive terminal UI (Ink)
+  --login                  open a browser to log in and capture cookies before scraping
+  --login-mode <mode>      cookie capture strategy for --login (default: "fresh")
   -h, --help               display help for command
+
+Commands:
+  login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started")
 ```
 
 Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
@@ -98,6 +135,8 @@ Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to s
 ### Terminal UI (`--tui`)
 
 Add `--tui` (or run `npm run tui`) to drive a scrape from an [Ink](https://github.com/vadimdemedes/ink) terminal UI instead of a wall of log lines: a live spinner, the current course and phase (`3/12 — Modules`), a scrolling pane of the most recent log messages, and a final summary. It accepts all the same flags — e.g. `node index.js https://<school_domain> --all --tui` — and falls back to the interactive wizard when no URL is given.
+
+`--login` works inside the TUI too: `node index.js https://<school_domain> --all --tui --login` opens the browser as an interactive first phase, waits (in the UI) for you to press **Enter** once you're signed in, saves your cookies, then rolls straight into the scrape.
 
 The scraping logic itself lives in a UI-agnostic core (`core/scrape.js`, `runScrape(url, options, hooks)`); the CLI, the TUI, and a future GUI are all thin front-ends over it, so the three stay in sync automatically.
 
@@ -175,7 +214,9 @@ The `-s` flag archives the course's **Study.Net Materials** tab into `STUDYNET/`
 
 ### Transcribing videos
 
-The `-t` flag runs a transcription command on each downloaded video. Set the command in `config.json` as `"transcribeCommand"`; `yt-dlp` runs it once per finished file, replacing `{}` with the video's path (covering playlists/Panopto folders automatically). If `{}` is omitted, the file path is appended.
+The `-t` flag runs a transcription command on each downloaded video. Set the command in `config.json` as `"transcribeCommand"`; it runs once per finished file, replacing `{}` with the video's path (covering playlists/Panopto folders automatically). If `{}` is omitted, the file path is appended.
+
+Transcription is interleaved with downloading: as soon as each video finishes downloading it starts transcribing in the background while the next video downloads, so the two overlap instead of waiting for the whole folder. Progress shows in the terminal UI as its own `📝` line (alongside the `🎬` download line) with elapsed time, plus a percentage bar when the transcriber prints one — most Whisper-family tools do. Since the command is arbitrary, tools that emit no progress simply show elapsed time until they finish.
 
 [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) has no headless CLI, so the practical macOS options are:
 

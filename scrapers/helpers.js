@@ -3,14 +3,11 @@ import fetch from "node-fetch";
 import path from "path";
 import os from "os";
 import http from "http";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import { Browser, Page } from "puppeteer";
 import { Readable } from "stream";
 
 import report from "./report.js";
-
-const execFileAsync = promisify(execFile);
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -122,13 +119,7 @@ const exported = {
     }
 
     const filePath = path.join(dir, filename);
-    await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(filePath);
-      response.body.on("error", reject);
-      fileStream.on("error", reject);
-      fileStream.on("finish", resolve);
-      response.body.pipe(fileStream);
-    });
+    await this.streamToFile(response, filePath, filename);
     // No content-disposition filename means the server likely returned an error
     // page instead of the file — the caller treats this as a failed download.
     const ok = filename !== backupName;
@@ -535,13 +526,7 @@ const exported = {
     filename = this.stripInvalid(filename);
 
     const filePath = path.join(dir, filename);
-    await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(filePath);
-      response.body.on("error", reject);
-      fileStream.on("error", reject);
-      fileStream.on("finish", resolve);
-      response.body.pipe(fileStream);
-    });
+    await this.streamToFile(response, filePath, filename);
     report.record(filePath, url);
     return true;
   },
@@ -667,6 +652,22 @@ const exported = {
       "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
       "-o",
       outTemplate,
+      // Emit one machine-readable progress line per update (rather than a
+      // \r-updated bar) so we can parse it and drive our own progress display.
+      "--newline",
+      "--progress-template",
+      "download:" +
+        [
+          "CSVID",
+          "%(info.playlist_index)s",
+          "%(info.n_entries)s",
+          "%(progress.downloaded_bytes)s",
+          "%(progress.total_bytes)s",
+          "%(progress.total_bytes_estimate)s",
+          "%(progress.speed)s",
+          "%(progress.eta)s",
+          "%(info.title)s",
+        ].join("\t"),
     ];
 
     // For a single video, don't expand any playlist the URL happens to belong to.
@@ -676,16 +677,15 @@ const exported = {
     if (cookieFile) args.push("--cookies", cookieFile);
 
     // Optional post-download transcription: run the configured command on each
-    // finished file ({} -> the file path). yt-dlp runs this once per downloaded
-    // video, so playlists/folders are covered automatically.
+    // finished file. Rather than yt-dlp's --exec (opaque), we run it ourselves
+    // after the download so we can report transcription progress.
+    let transcribeCmd = "";
     if (process.env.transcribe === "true") {
-      let cmd = "";
       try {
-        cmd = JSON.parse(process.env.config || "{}").transcribeCommand || "";
+        transcribeCmd = JSON.parse(process.env.config || "{}").transcribeCommand || "";
       } catch (e) {
         // no/invalid config
       }
-      if (cmd) args.push("--exec", cmd);
     }
 
     args.push(url);
@@ -693,27 +693,254 @@ const exported = {
     // yt-dlp picks its own output filenames (and playlist subfolders), so snapshot
     // the directory and report whatever new files the download adds.
     const before = report.snapshot(absDir);
+    // A second, report-independent snapshot so we can find the downloaded media
+    // to transcribe even when --report is off (report.snapshot is empty then).
+    // Only needed when transcribing.
+    const filesBefore = transcribeCmd
+      ? new Set(this.listFilesRecursive(absDir))
+      : null;
 
-    try {
-      await execFileAsync("yt-dlp", args);
-      report.recordNewFiles(absDir, before, url);
-      return true;
-    } catch (e) {
-      if (e.code === "ENOENT") {
-        if (!warnedMissingYtDlp) {
-          warnedMissingYtDlp = true;
-          this.print(
-            "WARNING",
-            "YT-DLP",
-            "yt-dlp is not installed or not on PATH. Skipping video downloads. Install it (e.g 'brew install yt-dlp').",
-            0
+    const num = (s) => {
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    return await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn("yt-dlp", args, { windowsHide: true });
+      } catch (e) {
+        this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.message);
+        return resolve(false);
+      }
+
+      let stderr = "";
+      let outBuf = "";
+      let currentTitle = "";
+
+      // Interleaved transcription: as each media file finishes downloading, queue
+      // it for transcription (running sequentially in the background) so it
+      // overlaps the next download instead of waiting for the whole folder. A
+      // file is considered finished once it exists with no temp sibling and its
+      // size is stable across two sweeps (so we never grab it mid-merge/move).
+      const MEDIA_RE = /\.(mp4|m4a|mkv|webm|mp3|wav)$/i;
+      const queued = new Set();
+      const sizes = new Map();
+      let transcribeChain = Promise.resolve();
+      const sweep = () => {
+        if (!transcribeCmd || !filesBefore) return;
+        for (const f of this.listFilesRecursive(absDir)) {
+          if (queued.has(f) || filesBefore.has(f) || !MEDIA_RE.test(f)) continue;
+          let size;
+          try {
+            size = fs.statSync(f).size;
+          } catch (e) {
+            continue;
+          }
+          if (size <= 0) continue;
+          if (sizes.get(f) !== size) {
+            sizes.set(f, size); // record; enqueue only once it's stable
+            continue;
+          }
+          queued.add(f);
+          transcribeChain = transcribeChain.then(() =>
+            this.runTranscribeOne(transcribeCmd, f, queued.size, null)
           );
         }
-        return false;
-      }
-      this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.stderr || e.message);
-      return false;
+      };
+      const sweepTimer =
+        transcribeCmd && filesBefore ? setInterval(sweep, 1500) : null;
+      const stopSweep = () => {
+        if (sweepTimer) clearInterval(sweepTimer);
+      };
+
+      // Parse one "download:" progress-template line (tab-separated, prefixed
+      // with our CSVID sentinel) and report it. Non-matching stdout is ignored.
+      const handleLine = (line) => {
+        if (!line.startsWith("CSVID\t")) return;
+        const p = line.split("\t");
+        const index = num(p[1]);
+        const count = num(p[2]);
+        const received = num(p[3]);
+        const total = num(p[4]) ?? num(p[5]); // total, else estimate
+        const speed = num(p[6]);
+        const eta = num(p[7]);
+        const title = p.slice(8).join("\t").trim();
+        const name = title || url;
+        if (title && title !== currentTitle) {
+          currentTitle = title;
+          this.emitProgress({ scope: "video", phase: "start", name, index, count });
+        }
+        this.emitProgress({
+          scope: "video",
+          phase: "progress",
+          name,
+          received,
+          total,
+          percent: total ? (received / total) * 100 : null,
+          speed,
+          eta,
+          index,
+          count,
+        });
+      };
+
+      child.stdout.on("data", (d) => {
+        outBuf += d.toString();
+        let nl;
+        while ((nl = outBuf.indexOf("\n")) >= 0) {
+          const line = outBuf.slice(0, nl).replace(/\r$/, "");
+          outBuf = outBuf.slice(nl + 1);
+          handleLine(line);
+        }
+      });
+      child.stderr.on("data", (d) => {
+        stderr += d.toString();
+      });
+
+      child.on("error", (e) => {
+        stopSweep();
+        if (e.code === "ENOENT") {
+          if (!warnedMissingYtDlp) {
+            warnedMissingYtDlp = true;
+            this.print(
+              "WARNING",
+              "YT-DLP",
+              "yt-dlp is not installed or not on PATH. Skipping video downloads. Install it (e.g 'brew install yt-dlp').",
+              0
+            );
+          }
+          return resolve(false);
+        }
+        this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.message);
+        resolve(false);
+      });
+
+      child.on("close", async (code) => {
+        stopSweep();
+        this.emitProgress({
+          scope: "video",
+          phase: "done",
+          name: currentTitle || url,
+        });
+        // Catch any files finished right before exit (two passes satisfy the
+        // size-stability check for the last file), then let all queued
+        // transcriptions run to completion.
+        if (transcribeCmd && filesBefore) {
+          sweep();
+          sweep();
+          await transcribeChain;
+        }
+        if (code === 0) {
+          report.recordNewFiles(absDir, before, url);
+          return resolve(true);
+        }
+        // ENOENT is handled by the 'error' handler above (no 'close' with 0).
+        this.print(
+          "WARNING",
+          "YT-DLP",
+          `Could not download ${url}`,
+          0,
+          stderr.trim() || `yt-dlp exited with code ${code}`
+        );
+        resolve(false);
+      });
+    });
+  },
+
+  /** Lists every file under `dir` recursively (absolute paths). */
+  listFilesRecursive(dir) {
+    const out = [];
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      return out;
     }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...this.listFilesRecursive(full));
+      else out.push(full);
+    }
+    return out;
+  },
+
+  /** Wraps a path for a shell command (double-quoted; matches yt-dlp's --exec). */
+  shellQuote(p) {
+    return `"${String(p).replace(/(["\\$`])/g, "\\$1")}"`;
+  },
+
+  /**
+   * Runs one transcription, emitting scope:"transcribe" progress events. Mirrors
+   * yt-dlp's --exec: "{}" in the command is replaced with the file path (quoted);
+   * if absent, the path is appended.
+   */
+  runTranscribeOne(cmd, file, index, count) {
+    return new Promise((resolve) => {
+      const name = path.basename(file);
+      const quoted = this.shellQuote(file);
+      const fullCmd = cmd.includes("{}")
+        ? cmd.replaceAll("{}", quoted)
+        : `${cmd} ${quoted}`;
+
+      this.emitProgress({ scope: "transcribe", phase: "start", name, index, count });
+      const start = Date.now();
+      let percent = null;
+
+      let child;
+      try {
+        child = spawn(fullCmd, { shell: true });
+      } catch (e) {
+        this.print("WARNING", "TRANSCRIBE", `Could not transcribe ${name}`, 1, e.message);
+        this.emitProgress({ scope: "transcribe", phase: "done", name, index, count });
+        return resolve();
+      }
+
+      // Emit a heartbeat so the elapsed time keeps ticking even when the tool
+      // is quiet (many transcribers print nothing until they finish).
+      const timer = setInterval(() => {
+        this.emitProgress({
+          scope: "transcribe",
+          phase: "progress",
+          name,
+          percent,
+          elapsed: (Date.now() - start) / 1000,
+          index,
+          count,
+        });
+      }, 1000);
+
+      // Best-effort percent: most whisper-family tools print a "NN%" somewhere.
+      const scan = (buf) => {
+        const m = String(buf).match(/(\d{1,3})\s*%/g);
+        if (m) {
+          const p = parseInt(m[m.length - 1], 10);
+          if (Number.isFinite(p)) percent = Math.max(0, Math.min(100, p));
+        }
+      };
+      if (child.stdout) child.stdout.on("data", scan);
+      if (child.stderr) child.stderr.on("data", scan);
+
+      const finish = () => {
+        clearInterval(timer);
+        this.emitProgress({
+          scope: "transcribe",
+          phase: "done",
+          name,
+          percent,
+          elapsed: (Date.now() - start) / 1000,
+          index,
+          count,
+        });
+        resolve();
+      };
+
+      child.on("error", (e) => {
+        this.print("WARNING", "TRANSCRIBE", `Could not transcribe ${name}`, 1, e.message);
+        finish();
+      });
+      child.on("close", finish);
+    });
   },
 
   /**
@@ -948,6 +1175,72 @@ const exported = {
    */
   setPrinter(fn) {
     this.printer = fn || null;
+  },
+
+  // Optional sink for download progress. When set (via setProgressSink), the
+  // file/video downloaders report progress to it so a front-end can render a
+  // bar. Each event: { scope: "file"|"video", phase: "start"|"progress"|"done",
+  // name, received, total, percent, speed, eta, index, count }. null = ignored.
+  progressSink: null,
+
+  /** Routes download-progress events to `fn` (or disables them when null). */
+  setProgressSink(fn) {
+    this.progressSink = fn || null;
+  },
+
+  /** Emits one download-progress event; never lets a UI error break a download. */
+  emitProgress(evt) {
+    if (!this.progressSink) return;
+    try {
+      this.progressSink(evt);
+    } catch (e) {
+      /* a failing progress sink must not abort the download */
+    }
+  },
+
+  /**
+   * Streams a fetch response body to `filePath`, reporting byte progress. Byte
+   * counting on 'data' runs alongside the pipe (it doesn't consume the stream).
+   * @param {object} response node-fetch response (with a readable `body`)
+   * @param {string} filePath destination path
+   * @param {string} name human-readable name for progress events
+   * @param {string} [scope="file"] progress scope label
+   */
+  async streamToFile(response, filePath, name, scope = "file") {
+    const total = Number(response.headers.get("content-length")) || 0;
+    let received = 0;
+    let lastEmit = 0;
+    this.emitProgress({ scope, phase: "start", name, received: 0, total });
+    await new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(filePath);
+      response.body.on("error", reject);
+      response.body.on("data", (chunk) => {
+        received += chunk.length;
+        const now = Date.now();
+        if (now - lastEmit >= 150) {
+          lastEmit = now;
+          this.emitProgress({
+            scope,
+            phase: "progress",
+            name,
+            received,
+            total,
+            percent: total ? (received / total) * 100 : null,
+          });
+        }
+      });
+      fileStream.on("error", reject);
+      fileStream.on("finish", resolve);
+      response.body.pipe(fileStream);
+    });
+    this.emitProgress({
+      scope,
+      phase: "done",
+      name,
+      received,
+      total,
+      percent: total ? 100 : null,
+    });
   },
 
   print(type, name, message, indent = 0, additional = null) {
