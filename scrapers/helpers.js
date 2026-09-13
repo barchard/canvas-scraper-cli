@@ -15,6 +15,9 @@ const execFileAsync = promisify(execFile);
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
 let ytDlpCookieFile = null;
+// Cache of each course's home-page type (default_view), keyed by course URL,
+// so the redirect guard in scrapeSections queries the API at most once/course.
+const courseDefaultViewCache = new Map();
 
 const exported = {
   /**
@@ -985,6 +988,41 @@ const exported = {
   },
 
   /**
+   * Returns a course's home-page type ("modules", "assignments", "wiki",
+   * "syllabus", "feed", ...) from the Canvas API, or null if it can't be
+   * determined. Canvas hides a content tab from the nav when the home page IS
+   * that content (e.g. a Modules home hides the Modules tab); scrapeSections
+   * uses this to tell a legitimate home redirect from a disabled tab. Cached
+   * per course.
+   * @param {string} courseUrl e.g "https://canvas.mit.edu/courses/38628"
+   * @param {Array<object>} cookies session cookies
+   * @returns {Promise<string|null>}
+   */
+  async getCourseDefaultView(courseUrl, cookies) {
+    if (courseDefaultViewCache.has(courseUrl))
+      return courseDefaultViewCache.get(courseUrl);
+    let view = null;
+    try {
+      const apiUrl = courseUrl.replace("/courses/", "/api/v1/courses/");
+      const cookieHeader = cookies
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+      const res = await fetch(apiUrl, {
+        headers: { Cookie: cookieHeader, Accept: "application/json" },
+      });
+      if (res.ok) {
+        const course = await res.json();
+        view = course.default_view || null;
+      }
+    } catch (e) {
+      // Non-fatal: without it the guard just treats any redirect as a
+      // disabled tab, which is the safe default.
+    }
+    courseDefaultViewCache.set(courseUrl, view);
+    return view;
+  },
+
+  /**
    * Gets all sections from a page
    * @param {Page} page page to scrape from
    * @param {string} sectionSelector selector for sections
@@ -1082,9 +1120,6 @@ const exported = {
     scrapingFunction
   ) {
     console.log(`=== SCRAPING ${this.types[type].p.toUpperCase()} ===`);
-    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`, {
-      recursive: true,
-    });
     const page = await this.newPage(
       browser,
       cookies,
@@ -1098,8 +1133,55 @@ const exported = {
         0,
         http.STATUS_CODES[page.status]
       );
+      await page.close().catch(() => {});
       return;
     }
+
+    // A disabled course tab (e.g. Quizzes turned off) makes Canvas redirect the
+    // request to another page — usually the course home — which still returns
+    // 200. Without this guard the generic selectors would scrape that other
+    // page's content (e.g. Modules) as if it were this section.
+    //
+    // A redirect is only legitimate when the tab lands on the course home AND
+    // the home is configured to display this same content (Canvas hides, say,
+    // the Modules tab when the home page IS the modules list). Any other
+    // redirect means the tab is disabled, so skip it.
+    let finalPath;
+    try {
+      finalPath = new URL(page.url()).pathname.replace(/\/+$/, "");
+    } catch {
+      finalPath = page.url();
+    }
+    if (!finalPath.endsWith(`/${this.types[type].p}`)) {
+      let courseHomePath;
+      try {
+        courseHomePath = new URL(url).pathname.replace(/\/+$/, "");
+      } catch {
+        courseHomePath = url;
+      }
+      // default_view values that mean "the home page is this section".
+      const homeView = { module: "modules", assignment: "assignments" }[type];
+      const homeShowsThisSection =
+        finalPath === courseHomePath &&
+        homeView &&
+        (await this.getCourseDefaultView(url, cookies)) === homeView;
+      if (!homeShowsThisSection) {
+        this.print(
+          "WARNING",
+          this.types[type].p.toUpperCase(),
+          `The ${this.types[type].p} tab is disabled or redirected (landed on ${page.url()}); skipping.`,
+          0
+        );
+        await page.close().catch(() => {});
+        return;
+      }
+    }
+
+    // Only now that we know the tab is real do we create its output directory,
+    // so a disabled/redirected tab doesn't leave an empty folder behind.
+    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`, {
+      recursive: true,
+    });
 
     if (type === "assignment") {
       let submissionsURL = `${url.replace(
