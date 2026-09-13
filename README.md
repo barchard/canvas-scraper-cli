@@ -90,6 +90,14 @@ After, you can simply run the entry file directly...
 
 `node index.js [options] <url>`
 
+### Guided setup (no arguments)
+
+Not sure about the flags? Just run it with no arguments:
+
+`node index.js`
+
+This starts an interactive wizard that walks you through the whole run: it asks for your Canvas URL, offers to **log you in** (opening a browser to capture your cookies — see [Getting Started](#getting-started)) or reuse an existing cookies file, lets you choose **what to scrape** (assignments / modules / quizzes / videos / study.net), and — if you gave a school domain rather than a single course URL — fetches your enrolled courses so you can **pick one course or scrape them all**. Finally it asks for the output directory and any extras (report / wiki / octarine / transcribe), then runs the scrape.
+
 ## Usage
 
 ```

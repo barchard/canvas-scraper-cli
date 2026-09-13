@@ -5,6 +5,7 @@ import inquirer from "inquirer";
 import helpers from "./scrapers/helpers.js";
 import { runScrape } from "./core/scrape.js";
 import { runLogin } from "./core/login.js";
+import { runWizard } from "./core/wizard.js";
 import { renderTui } from "./tui/app.js";
 
 const argDef = [
@@ -181,15 +182,17 @@ program
   });
 
 program.action(async (url, options) => {
-  if (!url) {
-    helpers.print("NOTE", "URL", "No URL provided. Entering wizard...");
-    const answers = await inquirer.prompt(argDef.concat(flagDef));
-
-    url = answers.url;
-    Object.assign(options, answers);
-  }
-
   try {
+    // No URL -> the full guided wizard: prompt for the URL, log in, choose what
+    // to scrape, and pick a course (or all). It returns a resolved URL + a
+    // complete options object, so it drives the scrape directly and returns.
+    if (!url) {
+      helpers.print("NOTE", "URL", "No URL provided. Entering wizard...", 0);
+      const wiz = await runWizard();
+      await runScrape(wiz.url, wiz.options);
+      return;
+    }
+
     // --tui renders the run in an Ink terminal UI; otherwise stream to the
     // console. The TUI drives --login itself (as an interactive first phase),
     // so only run the standalone capture here for the non-TUI path.
