@@ -160,7 +160,10 @@ async function scrapeVideos(browser, cookies, url, dir) {
 
     let folderUrl = null;
     if (info.folderId && origin) {
-      folderUrl = `${origin}/Panopto/Pages/Sessions/List.aspx?folderID=${info.folderId}`;
+      // yt-dlp scopes to the folder id in the URL *fragment*, not the query
+      // string; use the canonical form so the download stays scoped to this
+      // course folder (see helpers.panoptoListUrl).
+      folderUrl = helpers.panoptoListUrl(origin, info.folderId);
     }
     if (!folderUrl) folderUrl = helpers.panoptoFolderUrl(info.href || frame.url());
 
