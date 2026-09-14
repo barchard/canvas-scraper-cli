@@ -163,6 +163,31 @@ const PHASES = [
 ];
 
 /**
+ * Builds a self-contained, macOS/Windows-safe folder name for a course.
+ *
+ * The folder is named after the course (sanitized via helpers.stripInvalid).
+ * The course id is appended only when it's needed to keep the name usable or
+ * unique: when the sanitized name is empty, or when another course in this run
+ * already claimed the same name.
+ * @param {string} name the course name (may be empty/null)
+ * @param {(string|number)} id the course id
+ * @param {Set<string>} [used] lowercased folder names already used this run
+ * @returns {string} the folder name (relative, never empty)
+ */
+function courseFolderName(name, id, used) {
+  let base = helpers.stripInvalid(name || "");
+  // stripInvalid returns "untitled" for an empty name — fall back to the id.
+  if (!name || base === "untitled") base = helpers.stripInvalid(`course-${id}`);
+
+  let folder = base;
+  if (used && used.has(folder.toLowerCase())) {
+    folder = helpers.stripInvalid(`${base} (${id})`);
+  }
+  if (used) used.add(folder.toLowerCase());
+  return folder;
+}
+
+/**
  * Scrapes one course into `courseDir` (homepage PDF + the selected sections).
  */
 async function scrapeCourse(
@@ -175,6 +200,9 @@ async function scrapeCourse(
   onProgress
 ) {
   helpers.print("INFO", "COURSE", `Scraping ${courseUrl}`, 0);
+  // Refresh just this course's own folder so re-scraping a course replaces its
+  // contents without disturbing sibling courses in the main output folder.
+  if (fs.existsSync(courseDir)) fs.rmSync(courseDir, { recursive: true, force: true });
   fs.mkdirSync(courseDir, { recursive: true });
 
   // Attribute every asset downloaded below to this course in the report.
@@ -286,9 +314,10 @@ export async function runScrape(url, options, hooks = {}) {
 
     emit(`FLAGS: ${JSON.stringify(options)}`);
 
-    // create (fresh) output directory
+    // Ensure the main output folder exists. It holds one self-contained
+    // subfolder per course, so we don't wipe it here (that would delete sibling
+    // courses from earlier runs) — each course's own folder is refreshed instead.
     const dir = options.output;
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true });
 
     const toScrape = resolveToScrape(options);
@@ -301,11 +330,14 @@ export async function runScrape(url, options, hooks = {}) {
 
     let courseCount = 0;
     if (courseId) {
-      // single course -> output straight into `dir`
+      // single course -> its own self-contained folder inside the main folder,
+      // named after the course (falling back to the id if the name is unavailable).
       const courseUrl = `${domain}/courses/${courseId}`;
+      const courseName = await helpers.getCourseName(domain, courseId, cookies);
+      const courseDir = `${dir}/${courseFolderName(courseName, courseId, null)}`;
       onProgress({ type: "start", mode: "single", total: 1 });
-      onProgress({ type: "course", index: 1, total: 1, name: null, url: courseUrl });
-      await scrapeCourse(browser, cookies, courseUrl, dir, toScrape, null, onProgress);
+      onProgress({ type: "course", index: 1, total: 1, name: courseName, url: courseUrl });
+      await scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape, courseName, onProgress);
       onProgress({ type: "course-end", index: 1, total: 1 });
       courseCount = 1;
     } else {
@@ -329,6 +361,7 @@ export async function runScrape(url, options, hooks = {}) {
         helpers.print("NOTE", "COURSES", `Found ${courses.length} course(s).`, 0);
         onProgress({ type: "start", mode: "all", total: courses.length });
         let index = 0;
+        const usedFolders = new Set();
         for (const c of courses) {
           index++;
           const courseUrl = `${domain}/courses/${c.id}`;
@@ -339,7 +372,7 @@ export async function runScrape(url, options, hooks = {}) {
             name: c.name,
             url: courseUrl,
           });
-          const courseDir = `${dir}/${helpers.stripInvalid(`${c.name} (${c.id})`)}`;
+          const courseDir = `${dir}/${courseFolderName(c.name, c.id, usedFolders)}`;
           try {
             await scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape, c.name, onProgress);
             courseCount++;
