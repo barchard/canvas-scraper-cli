@@ -376,6 +376,23 @@ const exported = {
    * @param {string} u a Panopto URL
    * @returns {string|null}
    */
+  /**
+   * Builds a canonical Panopto folder ("List") URL scoped to a single folder, in
+   * the exact form yt-dlp's PanoptoListIE understands. yt-dlp reads the folder id
+   * from the URL *fragment* (via `_parse_fragment`), not the query string, and
+   * json.loads() each value — so the id must live after the `#` and be wrapped in
+   * (URL-encoded) double quotes, e.g. `List.aspx?noredirect=true#folderID="<id>"`.
+   * Passing the id in the query string instead makes yt-dlp see no folder and
+   * fall back to listing *every* session the user can view (all courses), so this
+   * form is required to keep the download scoped to the one course folder.
+   * @param {string} origin the Panopto origin, e.g. https://org.hosted.panopto.com
+   * @param {string} folderId the folder GUID
+   * @returns {string}
+   */
+  panoptoListUrl(origin, folderId) {
+    return `${origin}/Panopto/Pages/Sessions/List.aspx?noredirect=true#folderID=%22${folderId}%22`;
+  },
+
   panoptoFolderUrl(u) {
     try {
       const url = new URL(u);
@@ -393,7 +410,7 @@ const exported = {
         if (m) folderId = m[1];
       }
       if (folderId) {
-        return `${url.protocol}//${url.host}/Panopto/Pages/Sessions/List.aspx?folderID=${folderId}`;
+        return this.panoptoListUrl(`${url.protocol}//${url.host}`, folderId);
       }
     } catch (e) {
       // not a parseable URL
