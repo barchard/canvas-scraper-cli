@@ -26,9 +26,10 @@ const flagDef = [
     type: "input",
     name: "output",
     message: "Please enter the output directory name:",
-    default: "courses/course",
+    default: "courses",
     flags: "-o, --output <dir_name>",
-    description: "output directory name",
+    description:
+      "main output directory; each course is saved in its own subfolder named after the course",
   },
   {
     type: "input",

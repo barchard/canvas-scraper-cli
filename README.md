@@ -109,7 +109,7 @@ Arguments:
   url                      Course URL (https://<school_domain>/courses/<course_id>), or a bare https://<school_domain> to scrape all your courses
 
 Options:
-  -o, --output <dir_name>  output directory name (default: "courses/course")
+  -o, --output <dir_name>  main output directory; each course is saved in its own subfolder named after the course (default: "courses")
   -c, --cookies <path>     path to cookies file, JSON or Netscape format (default: "cookies.json")
   -a                       scrape assignments (default: false)
   -m                       scrape modules (default: false)
@@ -206,7 +206,9 @@ Pass a bare domain (no `/courses/<id>`) to scrape **every course you're enrolled
 node index.js -o courses https://<school_domain>
 ```
 
-The scraper queries the Canvas API (`/api/v1/courses`, using your cookies) for all your courses — current **and** past/completed enrollments — and scrapes each one into its own subfolder of the output directory, named `<Course Name> (<id>)`. (Courses you can no longer open, e.g. those date-restricted after a term ends, are skipped.) If your institution blocks cookie-authenticated API access, it automatically falls back to scraping the `/courses` page instead. The same flags apply to every course; a course that fails (e.g. an inaccessible homepage) is logged and skipped without stopping the rest. Give a full course URL to scrape just that one course (output goes straight into the output directory, as before).
+The scraper queries the Canvas API (`/api/v1/courses`, using your cookies) for all your courses — current **and** past/completed enrollments — and scrapes each one into its own subfolder of the output directory, named after the course. The course id is appended (`<Course Name> (<id>)`) only when it's needed to keep the folder name usable or unique. (Courses you can no longer open, e.g. those date-restricted after a term ends, are skipped.) If your institution blocks cookie-authenticated API access, it automatically falls back to scraping the `/courses` page instead. The same flags apply to every course; a course that fails (e.g. an inaccessible homepage) is logged and skipped without stopping the rest.
+
+Give a full course URL to scrape just that one course. It's placed in its own self-contained subfolder of the output directory, named after the course (looked up via the Canvas API, falling back to `course-<id>` if the name is unavailable) — so the main output folder holds one folder per course whether you scrape one course or all of them. Folder names are sanitized to be valid on both macOS and Windows. Because each course lives in its own folder, re-scraping a single course refreshes only that folder and leaves the other courses in the main folder untouched.
 
 The `-v` flag archives the course's **Videos** tab (the Panopto course folder): it launches the Panopto LTI tab while signed in, finds the folder it lands on, and downloads every session as `mp4` via `yt-dlp` into `VIDEOS/`. This requires your Panopto cookies in the cookies file (see [Cookies for Panopto](#cookies-for-panopto-and-other-login-gated-videos)). The nav tab is matched by the label `Videos` by default; if your course names it differently, set `"videosTabLabel"` in `config.json`.
 

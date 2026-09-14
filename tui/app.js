@@ -264,7 +264,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       ? { ...options, url, loginMode: options.loginMode || "fresh", _wizard: false }
       : {
           url: "",
-          output: "courses/course",
+          output: "courses",
           cookies: "cookies.json",
           loginMode: "fresh",
           a: false, m: false, q: false, v: false, s: false,
@@ -538,7 +538,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
   };
 
   const onOutput = (value) => {
-    configRef.current.output = value || "courses/course";
+    configRef.current.output = value || "courses";
     setStep("extras");
   };
 
@@ -627,7 +627,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
   } else if (step === "output") {
     view = h(TextPrompt, {
       message: "Output directory:",
-      initialValue: configRef.current.output || "courses/course",
+      initialValue: configRef.current.output || "courses",
       onSubmit: onOutput,
     });
   } else if (step === "extras") {

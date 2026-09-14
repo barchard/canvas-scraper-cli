@@ -54,6 +54,12 @@ const exported = {
 
     if (!name) return "untitled";
 
+    // Windows reserved device names (case-insensitive, with or without an
+    // extension) can't be used as a file/folder name — prefix an underscore.
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(name)) {
+      name = `_${name}`;
+    }
+
     // truncate to a safe byte length, preserving the extension
     const MAX_BYTES = 200;
     if (Buffer.byteLength(name, "utf8") > MAX_BYTES) {
@@ -282,6 +288,31 @@ const exported = {
     }
 
     return courses;
+  },
+
+  /**
+   * Looks up a single course's name via the Canvas REST API (session-cookie
+   * auth). Used to name the per-course output folder in single-course mode.
+   * @param {string} domain e.g "https://canvas.mit.edu"
+   * @param {(string|number)} courseId the course id from the URL
+   * @param {Array<object>} cookies session cookies
+   * @returns {Promise<string|null>} the course name, or null if unavailable
+   */
+  async getCourseName(domain, courseId, cookies) {
+    const cookieHeader = cookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+    try {
+      const response = await fetch(`${domain}/api/v1/courses/${courseId}`, {
+        headers: { Cookie: cookieHeader, Accept: "application/json" },
+      });
+      if (!response.ok) return null;
+      const course = await response.json();
+      const name = course && typeof course.name === "string" ? course.name.trim() : "";
+      return name || null;
+    } catch (e) {
+      return null;
+    }
   },
 
   /**
