@@ -17,11 +17,16 @@ import { findChrome } from "./chrome.js";
  * @param {string} [opts.userDataDir] persistent profile directory. Left unset
  *   today (the "fresh" login strategy uses a throwaway profile); reserved so a
  *   future persistent-profile strategy can keep the user signed in across runs.
+ * @param {number} [opts.protocolTimeout] max ms to wait for any CDP command.
+ *   Defaults to 300000 (5 min) — well above Puppeteer's 180s default — because
+ *   opening a new tab (Target.createTarget) and rendering large course PDFs can
+ *   exceed 180s under load, which otherwise aborts the scrape with a
+ *   "Target.createTarget timed out" / "increase the 'protocolTimeout'" error.
  * @returns {Promise<import("puppeteer").Browser>}
  */
 export async function launchBrowser(opts = {}) {
-  const { headless = "new", userDataDir } = opts;
-  const base = { headless };
+  const { headless = "new", userDataDir, protocolTimeout = 300000 } = opts;
+  const base = { headless, protocolTimeout };
   if (userDataDir) base.userDataDir = userDataDir;
 
   // Prefer an explicitly located system Chrome: the standalone builds don't

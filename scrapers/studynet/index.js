@@ -193,7 +193,7 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
   let coursePage;
   let toolPage;
   try {
-    fs.mkdirSync(studynetDir, { recursive: true });
+    if (!helpers.dryRun) fs.mkdirSync(studynetDir, { recursive: true });
 
     const label =
       JSON.parse(process.env.config || "{}").studyNetTabLabel || "Study.Net Materials";
@@ -276,6 +276,11 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
       // Website link the instructor listed: save a pointer, not a download.
       if (item.kind === "link") {
         const name = helpers.stripInvalid(item.name || item.url || "link");
+        if (helpers.dryRun) {
+          report.recordAvailable(item.url || name, "link");
+          helpers.print("NOTE", "STUDY.NET", `${prefix} - ${name} (website link)`, 1);
+          continue;
+        }
         fs.writeFileSync(
           `${studynetDir}/${prefix} - ${name}.url`,
           `[InternetShortcut]\r\nURL=${item.url}\r\n`
@@ -306,6 +311,12 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
       const filename = helpers.stripInvalid(
         `${prefix} - ${withExtension(item.name, item.matUrl, res.contentFilename)}`
       );
+      // Dry-run: the material downloaded, so it's accessible; don't write it.
+      if (helpers.dryRun) {
+        report.recordAvailable(item.matUrl || item.name || item.matId, "study.net");
+        helpers.print("NOTE", "STUDY.NET", `${filename} (accessible)`, 1);
+        continue;
+      }
       const filePath = `${studynetDir}/${filename}`;
       fs.writeFileSync(filePath, Buffer.from(res.base64, "base64"));
       report.record(filePath, item.matUrl || downloadUrl);

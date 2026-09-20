@@ -96,7 +96,7 @@ async function scrapeVideos(browser, cookies, url, dir) {
   let coursePage;
   let toolPage;
   try {
-    fs.mkdirSync(videosDir, { recursive: true });
+    if (!helpers.dryRun) fs.mkdirSync(videosDir, { recursive: true });
 
     const label =
       JSON.parse(process.env.config || "{}").videosTabLabel || "Videos";
