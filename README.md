@@ -253,6 +253,7 @@ How it works:
 - You drop the hand-obtained files into `<output>/import/` and tell the importer which gap each one fills, either with `--interactive` (it prompts you per file) or by writing a **manifest** — `<output>/import/manifest.csv` with `file,url` columns (JSON is also accepted). The `url` is the gap's Canvas link from `report-skipped.csv`; matching also succeeds on the HBSP resource id (e.g. `H03PQF-PDF-ENG`) if the URL was lightly edited.
 - Each file is copied to its `dest_dir` (falling back to `<output>/<course>/IMPORTED/` for older rows with no `dest_dir`), a `<file>.imported.json` sidecar records where it came from, and the import is logged to `<output>/import/imported.log.jsonl`. If the scrape produced a `report.csv`, imported files are appended to it as first-class assets.
 - Imports are **idempotent** — re-running skips anything already imported — and `--dry-run` shows what would happen without copying.
+- If the output was reorganized with `--wiki` or `--octarine`, the importer notices, places the file under `raw/` (or `.attachments/`) beside the scraped material, and regenerates `index.md` / the Octarine notes so the import shows up in the catalog.
 
 | Flag | Description |
 | --- | --- |

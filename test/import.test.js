@@ -5,6 +5,8 @@ import os from "os";
 import path from "path";
 
 import helpers from "../scrapers/helpers.js";
+import wiki from "../scrapers/wiki.js";
+import octarine from "../scrapers/octarine.js";
 import {
   parseCsv,
   hbspToken,
@@ -15,6 +17,7 @@ import {
   applyImports,
   runImport,
   gapLabel,
+  detectLayout,
 } from "../core/import.js";
 
 // Keep test output quiet.
@@ -202,6 +205,116 @@ test("dry-run plans but writes nothing", () => {
   assert.equal(summary.planned.length, 1);
   assert.ok(!fs.existsSync(path.join(destDir, "x.pdf")), "nothing copied on dry-run");
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("detectLayout recognizes wiki, octarine, and plain outputs", () => {
+  const dir = tmpDir();
+  assert.equal(detectLayout(dir).kind, "plain");
+  fs.mkdirSync(path.join(dir, "raw"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), "schema");
+  assert.deepEqual(detectLayout(dir), { kind: "wiki", subdir: "raw" });
+  const dir2 = tmpDir();
+  fs.mkdirSync(path.join(dir2, ".attachments"), { recursive: true });
+  assert.deepEqual(detectLayout(dir2), { kind: "octarine", subdir: ".attachments" });
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir2, { recursive: true, force: true });
+});
+
+test("import into a wiki workspace remaps under raw/ and regenerates index.md", async () => {
+  const output = tmpDir();
+  const scraped = path.join(output, "15.716", "ASSIGNMENTS", "Past", "Item", "ASSIGNMENT");
+  fs.mkdirSync(scraped, { recursive: true });
+  fs.writeFileSync(path.join(scraped, "existing.pdf"), "%PDF-1.4 existing");
+  fs.writeFileSync(
+    path.join(output, "report.csv"),
+    "file,type,size_bytes,size,course_name,course_url,original_url\r\n" +
+      "existing.pdf,pdf,17,17 B,15.716,https://c/38458,https://c/orig\r\n"
+  );
+  fs.writeFileSync(
+    path.join(output, "report-skipped.csv"),
+    `url,reason,dest_dir,course_name,course_url\r\n${HBSP_URL},not accessible,${scraped},15.716,https://c/38458\r\n`
+  );
+  // Organize into the wiki layout (moves 15.716 into raw/).
+  wiki.build(output, [
+    { file: "existing.pdf", originalUrl: "https://c/orig", courseName: "15.716", courseUrl: "https://c/38458" },
+  ]);
+  assert.equal(detectLayout(output).kind, "wiki");
+
+  // Drop a hand-obtained file and import it.
+  const dropDir = path.join(output, "import");
+  fs.mkdirSync(dropDir, { recursive: true });
+  fs.writeFileSync(path.join(dropDir, "session5.pdf"), "%PDF-1.4 s5");
+  fs.writeFileSync(path.join(dropDir, "manifest.csv"), `file,url\nsession5.pdf,${HBSP_URL}\n`);
+
+  const summary = await runImport(output, {});
+  assert.equal(summary.imported, 1);
+
+  const placed = path.join(output, "raw", "15.716", "ASSIGNMENTS", "Past", "Item", "ASSIGNMENT", "session5.pdf");
+  assert.ok(fs.existsSync(placed), "imported file lands under raw/ beside scraped material");
+
+  const index = fs.readFileSync(path.join(output, "index.md"), "utf8");
+  assert.match(index, /session5\.pdf\)/, "index lists the import");
+  assert.match(index, /existing\.pdf/, "index still lists scraped material");
+  assert.doesNotMatch(index, /imported\.json/, "provenance sidecar is not catalogued as a source");
+  const log = fs.readFileSync(path.join(output, "log.md"), "utf8");
+  assert.match(log, /manual import/, "log records the import");
+  fs.rmSync(output, { recursive: true, force: true });
+});
+
+test("import into an Octarine workspace remaps under .attachments/ and regenerates Index.md", async () => {
+  const output = tmpDir();
+  const scraped = path.join(output, "15.716", "MODULES", "Wk1", "Item");
+  fs.mkdirSync(scraped, { recursive: true });
+  fs.writeFileSync(path.join(scraped, "existing.pdf"), "%PDF-1.4 existing");
+  fs.writeFileSync(
+    path.join(output, "report-skipped.csv"),
+    `url,reason,dest_dir,course_name,course_url\r\n${HBSP_URL},not accessible,${scraped},15.716,https://c/38458\r\n`
+  );
+  octarine.build(output, [
+    { courseName: "15.716", courseUrl: "https://c/38458" },
+  ]);
+  assert.equal(detectLayout(output).kind, "octarine");
+
+  const dropDir = path.join(output, "import");
+  fs.mkdirSync(dropDir, { recursive: true });
+  fs.writeFileSync(path.join(dropDir, "reading.pdf"), "%PDF-1.4 reading");
+  fs.writeFileSync(path.join(dropDir, "manifest.csv"), `file,url\nreading.pdf,${HBSP_URL}\n`);
+
+  const summary = await runImport(output, {});
+  assert.equal(summary.imported, 1);
+
+  const placed = path.join(output, ".attachments", "15.716", "MODULES", "Wk1", "Item", "reading.pdf");
+  assert.ok(fs.existsSync(placed), "imported file lands under .attachments/");
+  const note = fs.readFileSync(path.join(output, "Courses", "15.716.md"), "utf8");
+  assert.match(note, /reading\.pdf/, "course note links the import");
+  fs.rmSync(output, { recursive: true, force: true });
+});
+
+test("import leaves top-level artifacts in place (no wrongful sweep on reindex)", async () => {
+  const output = tmpDir();
+  const scraped = path.join(output, "15.716", "ASSIGNMENTS", "S", "I", "ASSIGNMENT");
+  fs.mkdirSync(scraped, { recursive: true });
+  fs.writeFileSync(path.join(scraped, "existing.pdf"), "bytes");
+  fs.writeFileSync(
+    path.join(output, "report-skipped.csv"),
+    `url,reason,dest_dir,course_name,course_url\r\n${HBSP_URL},r,${scraped},15.716,u\r\n`
+  );
+  wiki.build(output, []);
+  // Artifacts the sweep does NOT reserve, written after build in a real run.
+  fs.writeFileSync(path.join(output, "download-diagnostics.jsonl"), "{}\n");
+  fs.writeFileSync(path.join(output, "errors.csv"), "time\n");
+
+  const dropDir = path.join(output, "import");
+  fs.mkdirSync(dropDir, { recursive: true });
+  fs.writeFileSync(path.join(dropDir, "x.pdf"), "x");
+  fs.writeFileSync(path.join(dropDir, "manifest.csv"), `file,url\nx.pdf,${HBSP_URL}\n`);
+  await runImport(output, {});
+
+  // These must still be at top level (not swept into raw/) after reindex.
+  assert.ok(fs.existsSync(path.join(output, "download-diagnostics.jsonl")));
+  assert.ok(fs.existsSync(path.join(output, "errors.csv")));
+  assert.ok(!fs.existsSync(path.join(output, "raw", "download-diagnostics.jsonl")));
+  fs.rmSync(output, { recursive: true, force: true });
 });
 
 test("runImport end-to-end via manifest", async () => {

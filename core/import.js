@@ -3,6 +3,8 @@ import path from "path";
 
 import helpers from "../scrapers/helpers.js";
 import report from "../scrapers/report.js";
+import wiki from "../scrapers/wiki.js";
+import octarine from "../scrapers/octarine.js";
 
 /**
  * Manual content importer.
@@ -306,9 +308,11 @@ function alreadyImported(url, log) {
  * @param {Array} manifest from readManifest
  * @param {string} dropDir folder holding the dropped files
  * @param {Array} log from readImportLog
+ * @param {string} [output] the output directory (for dest remapping)
+ * @param {{kind:string,subdir:string}} [layout] detected output layout
  * @returns {Array<{entry,row,srcFile,dest,status}>}
  */
-export function resolve(worklist, manifest, dropDir, log) {
+export function resolve(worklist, manifest, dropDir, log, output = "courses", layout = null) {
   // Index the worklist by every match key.
   const index = new Map();
   for (const row of worklist) {
@@ -338,7 +342,7 @@ export function resolve(worklist, manifest, dropDir, log) {
       status = "already-imported";
     } else {
       status = "ready";
-      dest = destForRow(row);
+      dest = destForRow(row, output, layout);
     }
     return { entry, row, srcFile, dest, status };
   });
@@ -347,11 +351,55 @@ export function resolve(worklist, manifest, dropDir, log) {
 /**
  * The folder an imported file for `row` should go into: the recorded `destDir`
  * when the scraper captured one, otherwise a per-course `IMPORTED/` fallback.
+ * When the output has been reorganized into a wiki (`raw/`) or Octarine
+ * (`.attachments/`) layout, the recorded destDir — captured during scraping,
+ * before that reorganization — is remapped under the layout's content subdir so
+ * the file lands beside the scraped material, not next to it.
+ * @param {object} row a worklist row
+ * @param {string} [output] the output directory
+ * @param {{kind:string,subdir:string}} [layout] detected output layout
  */
-function destForRow(row) {
-  if (row.destDir) return row.destDir;
-  const course = helpers.stripInvalid(row.courseName || "unknown-course");
-  return path.join("courses", course, "IMPORTED");
+function destForRow(row, output = "courses", layout = null) {
+  let dest = row.destDir;
+  if (!dest) {
+    const course = helpers.stripInvalid(row.courseName || "unknown-course");
+    dest = path.join(output, course, "IMPORTED");
+  }
+  if (layout && layout.subdir) dest = remapUnderSubdir(dest, output, layout.subdir);
+  return dest;
+}
+
+/**
+ * Detects whether `output` is a reorganized workspace and returns its content
+ * subdir. A wiki has `raw/` + `CLAUDE.md`; an Octarine workspace has
+ * `.attachments/`. Anything else is a plain scrape.
+ * @param {string} output
+ * @returns {{kind:"wiki"|"octarine"|"plain", subdir:string}}
+ */
+export function detectLayout(output) {
+  if (
+    fs.existsSync(path.join(output, "raw")) &&
+    fs.existsSync(path.join(output, "CLAUDE.md"))
+  ) {
+    return { kind: "wiki", subdir: "raw" };
+  }
+  if (fs.existsSync(path.join(output, ".attachments"))) {
+    return { kind: "octarine", subdir: ".attachments" };
+  }
+  return { kind: "plain", subdir: "" };
+}
+
+/**
+ * Remaps a scrape-time destination (`<output>/<rest>`) to sit under the layout's
+ * content subdir (`<output>/<subdir>/<rest>`). Falls back to an IMPORTED folder
+ * inside the subdir when destDir isn't inside `output`.
+ */
+function remapUnderSubdir(destDir, output, subdir) {
+  const rel = path.relative(output, destDir);
+  if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+    return path.join(output, subdir, rel);
+  }
+  return path.join(output, subdir, "IMPORTED");
 }
 
 /** Returns a path that doesn't collide with an existing file (adds " (n)"). */
@@ -615,8 +663,17 @@ export async function runImport(output, options = {}, hooks = {}) {
     return { imported: 0, skipped: 0, unmatched: 0, missing: 0, planned: [] };
   }
 
-  const resolved = resolve(worklist, manifest, dropDir, log);
+  // If the output was reorganized into a wiki / Octarine workspace, imports go
+  // under raw/ (or .attachments/) — the recorded destDir is remapped for that.
+  const layout = detectLayout(output);
+  const resolved = resolve(worklist, manifest, dropDir, log, output, layout);
   const summary = applyImports(resolved, { output, dryRun: options.dryRun });
+
+  // Fold imports into the wiki/Octarine catalog so they're listed alongside the
+  // scraped material (best-effort; a failure here doesn't fail the import).
+  if (!options.dryRun && summary.imported > 0 && layout.kind !== "plain") {
+    reconcileLayout(output, layout, summary);
+  }
 
   helpers.print(
     "NOTE",
@@ -626,6 +683,47 @@ export async function runImport(output, options = {}, hooks = {}) {
     0
   );
   return summary;
+}
+
+/**
+ * Reconstructs report rows from `report.csv` so a layout re-index can restore
+ * source links for every catalogued file (scraped and imported alike). Returns
+ * [] when there's no report.csv.
+ */
+function readReportRows(output) {
+  const reportPath = path.join(output, "report.csv");
+  if (!fs.existsSync(reportPath)) return [];
+  try {
+    return parseCsv(fs.readFileSync(reportPath, "utf8")).map((r) => ({
+      file: r.file || "",
+      originalUrl: r.original_url || "",
+      courseName: r.course_name || "",
+      courseUrl: r.course_url || "",
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Regenerates the wiki index.md (or Octarine notes + Index.md) so freshly
+ * imported files appear in the catalog. Uses reindex() — not build() — so it
+ * rescans raw/ (or .attachments/) in place without sweeping unrelated top-level
+ * artifacts. Best-effort: logs and swallows its own failure.
+ */
+function reconcileLayout(output, layout, summary) {
+  const rows = readReportRows(output);
+  try {
+    if (layout.kind === "wiki") {
+      wiki.reindex(output, rows, `imported ${summary.imported} file(s) via manual import`);
+      helpers.print("NOTE", "IMPORT", `Regenerated ${path.join(output, "index.md")} to include imports.`, 0);
+    } else if (layout.kind === "octarine") {
+      octarine.reindex(output, rows);
+      helpers.print("NOTE", "IMPORT", `Regenerated ${path.join(output, "Index.md")} to include imports.`, 0);
+    }
+  } catch (e) {
+    helpers.print("WARNING", "IMPORT", `Could not regenerate ${layout.kind} catalog: ${e.message}`, 0);
+  }
 }
 
 // Exported for testing.
