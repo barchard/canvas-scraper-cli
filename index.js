@@ -189,11 +189,22 @@ program.action(async (url, options) => {
     // Every flow drives a real Chrome; fail early with install help if absent.
     ensureChrome();
 
-    // No URL -> the unified Ink wizard: it prompts for the URL, logs in, asks
-    // what to scrape, lets the user pick a course (or all), then runs the
-    // scrape — all in one terminal UI.
+    // No URL -> the unified Ink wizard: it prompts for the URL, then shows an
+    // action menu (Log in / About / Scrape …). Scraping browses the courses
+    // first, then asks what to download — all in one terminal UI.
     if (!url) {
       await renderTui(undefined, {});
+      return;
+    }
+
+    // Whether the user asked to scrape specific content up front. When they
+    // didn't (a bare interactive `<url>` or `--tui <url>`), open the action
+    // menu instead of scraping; flag-driven runs stay non-interactive.
+    const hasContentFlags =
+      options.a || options.m || options.q || options.v || options.s || options.all;
+
+    if (!hasContentFlags && !options.login) {
+      await renderTui(url, { ...options, _menu: true });
       return;
     }
 

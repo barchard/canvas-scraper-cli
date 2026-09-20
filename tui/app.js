@@ -1,4 +1,8 @@
 import fs from "fs";
+import os from "os";
+import { execSync } from "child_process";
+import { fileURLToPath } from "url";
+import path from "path";
 import React from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
 
@@ -16,6 +20,46 @@ const MAX_LOGS = 14; // how many recent log lines to keep on screen
 const LIST_WINDOW = 12; // how many list items to show at once
 
 const URL_RE = /^https:\/\/[^/]+(\/courses\/[^/]+)?\/?$/;
+
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * Collects the lines shown by the "About" menu action: app version, Node/OS
+ * details, and the current git commit. Each lookup is best-effort — a packaged
+ * binary has no package.json or git checkout, so those simply read "unknown".
+ */
+function getAboutInfo() {
+  let version = "unknown";
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8")
+    );
+    version = pkg.version || version;
+  } catch {
+    /* no package.json (e.g. packaged binary) */
+  }
+
+  let sha = "unknown";
+  try {
+    sha = execSync("git rev-parse HEAD", {
+      cwd: PROJECT_ROOT,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+  } catch {
+    /* not a git checkout */
+  }
+  const shortSha = sha === "unknown" ? sha : sha.slice(0, 7);
+
+  return [
+    `Canvas Scraper CLI v${version}`,
+    `Commit: ${shortSha}${sha !== "unknown" ? ` (${sha})` : ""}`,
+    `Node: ${process.version}`,
+    `Platform: ${process.platform} ${process.arch}`,
+    `OS: ${os.type()} ${os.release()}`,
+  ];
+}
 
 /** Formats a byte count as a short human-readable string (e.g. "1.4 GB"). */
 function fmtBytes(n) {
@@ -261,7 +305,16 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
   // from the CLI options; in wizard mode the steps fill it in.
   const configRef = React.useRef(
     url
-      ? { ...options, url, loginMode: options.loginMode || "fresh", _wizard: false }
+      ? {
+          ...options,
+          url,
+          loginMode: options.loginMode || "fresh",
+          // Interactive when opened for the action menu (`<url>` / `--tui <url>`
+          // with no content flags); flag-driven runs skip straight to scraping.
+          _menu: !!options._menu,
+          _domain: parseTarget(url).domain,
+          _courseId: parseTarget(url).courseId,
+        }
       : {
           url: "",
           output: "courses",
@@ -270,15 +323,22 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
           a: false, m: false, q: false, v: false, s: false,
           t: false, report: false, wiki: false, octarine: false,
           all: false, tui: false,
-          _wizard: true,
+          _menu: true,
           _domain: "",
           _courseId: null,
         }
   );
 
-  // Step machine. Flag/--tui mode jumps straight to login or scraping; wizard
-  // mode (no url) starts at the first question.
-  const firstStep = url ? (options.login ? "login" : "scraping") : "url";
+  // Step machine. Wizard mode (no url) asks for the URL first, then everything
+  // funnels through the action menu. Flag-driven runs jump straight to login or
+  // scraping.
+  const firstStep = url
+    ? options._menu
+      ? "menu"
+      : options.login
+      ? "login"
+      : "scraping"
+    : "url";
   const [step, setStep] = React.useState(firstStep);
 
   const [logs, setLogs] = React.useState([]);
@@ -320,6 +380,14 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     { isActive: step === "login" && awaitingEnter }
   );
 
+  // Enter on the About screen returns to the action menu.
+  useInput(
+    (input, key) => {
+      if (key.return) setStep("menu");
+    },
+    { isActive: step === "about" }
+  );
+
   // Spinner animation (only while something is running).
   React.useEffect(() => {
     if (done) return undefined;
@@ -356,11 +424,14 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       .then(() => {
         if (cancelled) return;
         helpers.setPrinter(prevPrinter);
-        setStep(configRef.current._wizard ? "types" : "scraping");
+        // Allow logging in again later (the menu can re-enter this step).
+        loginStarted.current = false;
+        setStep(configRef.current._menu ? "menu" : "scraping");
       })
       .catch((e) => {
         if (cancelled) return;
         helpers.setPrinter(prevPrinter);
+        loginStarted.current = false;
         fail(e);
       });
 
@@ -381,7 +452,10 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         cookies = readCookies(configRef.current.cookies);
       } catch (e) {
         appendLogs([`[WARNING] COURSES | Could not read cookies: ${e.message}`]);
-        if (!cancelled) setStep("output"); // fall back to all courses
+        appendLogs([
+          "[NOTE] COURSES | Tip: run the Log in action first to capture cookies.",
+        ]);
+        if (!cancelled) setStep("types"); // fall back to all courses
         return;
       }
       appendLogs(["[NOTE] COURSES | Fetching your courses…"]);
@@ -408,7 +482,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         appendLogs([
           "[WARNING] COURSES | No courses found — falling back to all courses.",
         ]);
-        setStep("output");
+        setStep("types");
         return;
       }
       setCourses(found);
@@ -501,20 +575,39 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     const { domain, courseId } = parseTarget(value);
     cfg._domain = domain;
     cfg._courseId = courseId;
-    setStep("cookieSource");
+    setStep("menu");
   };
 
-  const onCookieSource = (value) => {
-    setStep(value === "login" ? "cookiesPathLogin" : "cookiesPathFile");
+  const onMenu = (value) => {
+    const cfg = configRef.current;
+    if (value === "scrape") {
+      // Browse the courses first (unless the URL already names one), then ask
+      // what to download.
+      setStep(cfg._courseId ? "types" : "scope");
+    } else if (value === "login") {
+      loginStarted.current = false;
+      setStep("cookiesPathLogin");
+    } else if (value === "about") {
+      setStep("about");
+    } else if (value === "changeUrl") {
+      setStep("url");
+    } else if (value === "exit") {
+      setDone(true);
+    }
   };
 
   const onCookiesPathLogin = (value) => {
     configRef.current.cookies = value || "cookies.json";
+    loginStarted.current = false;
     setStep("login");
   };
 
-  const onCookiesPathFile = (value) => {
-    configRef.current.cookies = value || "cookies.json";
+  const onScope = (value) => {
+    setStep(value === "one" ? "fetchCourses" : "types");
+  };
+
+  const onCourse = (id) => {
+    configRef.current.url = `${configRef.current._domain}/courses/${id}`;
     setStep("types");
   };
 
@@ -525,15 +618,6 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     cfg.q = values.includes("q");
     cfg.v = values.includes("v");
     cfg.s = values.includes("s");
-    setStep(cfg._courseId ? "output" : "scope");
-  };
-
-  const onScope = (value) => {
-    setStep(value === "one" ? "fetchCourses" : "output");
-  };
-
-  const onCourse = (id) => {
-    configRef.current.url = `${configRef.current._domain}/courses/${id}`;
     setStep("output");
   };
 
@@ -572,28 +656,34 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         "Use https://<school_domain> or https://<school_domain>/courses/<id>.",
       onSubmit: onUrl,
     });
-  } else if (step === "cookieSource") {
+  } else if (step === "menu") {
     view = h(SelectPrompt, {
-      message: "How should we get your Canvas cookies?",
+      message: `What would you like to do? (${configRef.current.url})`,
       items: [
-        { label: "Log in now (opens a browser) — recommended", value: "login" },
-        { label: "Use an existing cookies file", value: "file" },
+        { label: "Scrape / download from courses", value: "scrape" },
+        { label: "Log in (opens a browser to capture cookies)", value: "login" },
+        { label: "About (version, system & git info)", value: "about" },
+        { label: "Change Canvas URL", value: "changeUrl" },
+        { label: "Exit", value: "exit" },
       ],
-      onSelect: onCookieSource,
+      onSelect: onMenu,
     });
+  } else if (step === "about") {
+    view = h(
+      Box,
+      { flexDirection: "column" },
+      ...getAboutInfo().map((line, i) => h(Text, { key: i }, line)),
+      h(
+        Box,
+        { marginTop: 1 },
+        h(Text, { color: "cyan" }, "Press Enter to return to the menu.")
+      )
+    );
   } else if (step === "cookiesPathLogin") {
     view = h(TextPrompt, {
       message: "Where should the captured cookies be saved?",
-      initialValue: "cookies.json",
+      initialValue: configRef.current.cookies || "cookies.json",
       onSubmit: onCookiesPathLogin,
-    });
-  } else if (step === "cookiesPathFile") {
-    view = h(TextPrompt, {
-      message: "Path to your cookies file (JSON or Netscape):",
-      initialValue: "cookies.json",
-      validate: (v) =>
-        fs.existsSync(v) || "File does not exist. Please enter a valid path.",
-      onSubmit: onCookiesPathFile,
     });
   } else if (step === "types") {
     view = h(MultiSelectPrompt, {
@@ -722,7 +812,9 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
  * Renders the unified Ink terminal UI and resolves when it exits.
  *
  * @param {string} [url] the target Canvas URL. Omit it to run the interactive
- *   wizard (URL → login → what to scrape → which course → extras → scrape).
+ *   wizard: it asks for the URL, then opens the action menu (Log in / About /
+ *   Scrape …). The Scrape action browses the courses first, then asks what to
+ *   download. Pass `options._menu` to open that same menu for a given URL.
  * @param {object} [options] resolved scrape options (used when `url` is given).
  */
 export async function renderTui(url, options = {}) {
