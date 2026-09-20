@@ -74,11 +74,29 @@ function build(dir, rows = []) {
 
   // Sweep every non-reserved top-level entry into .attachments/. On a fresh
   // scrape these are the course folders (or, in single-course mode, the
-  // category folders and HOMEPAGE.pdf directly).
+  // category folders and HOMEPAGE.pdf directly). The sweep only happens on
+  // build; reindex() rescans an already-organized .attachments/ without moving
+  // anything, so it's safe to run after the fact when other top-level artifacts
+  // (errors.csv, download-diagnostics.jsonl, import/) are present.
   for (const name of fs.readdirSync(dir)) {
     if (reserved.has(name)) continue;
     fs.renameSync(path.join(dir, name), path.join(attachDir, name));
   }
+
+  return reindex(dir, rows);
+}
+
+/**
+ * Regenerates the course notes and Index.md from whatever is currently under
+ * .attachments/ — without the initial sweep. Use this to reconcile the
+ * workspace after files are added out of band (e.g. the manual importer).
+ * @param {string} dir the Octarine workspace directory
+ * @param {Array<object>} [rows] report rows for source links and course URLs
+ * @returns {{sources: number, notes: number, bytes: number}}
+ */
+function reindex(dir, rows = []) {
+  const attachDir = path.join(dir, ".attachments");
+  if (!fs.existsSync(attachDir)) return { sources: 0, notes: 0, bytes: 0 };
 
   // In single-course mode the files land directly under .attachments/ with no
   // course folder; recover the course's real name/URL from the report rows.
@@ -98,6 +116,9 @@ function build(dir, rows = []) {
   // Group into course -> category -> [entries].
   const courses = new Map();
   for (const full of files) {
+    // Skip the manual importer's provenance sidecars — they're metadata about a
+    // source, not a source themselves.
+    if (path.basename(full).endsWith(".imported.json")) continue;
     const rel = path.relative(attachDir, full);
     const segments = rel.split(path.sep);
     let { course, category } = classify(segments);
@@ -278,4 +299,4 @@ function listFilesRecursive(dir) {
   return out;
 }
 
-export default { build };
+export default { build, reindex };
