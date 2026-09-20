@@ -1,6 +1,7 @@
 node_modules
 .env.local
 canvas-scraper-*
+dist
 
 course
 courses
