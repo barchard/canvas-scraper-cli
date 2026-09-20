@@ -12,6 +12,12 @@ import report from "./report.js";
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
 let ytDlpCookieFile = null;
+// A browser-like User-Agent for plain fetches of external resources. Many news
+// sites (nytimes.com, etc.) return 403 to a header-less request; presenting a
+// real browser UA gets past the crudest bot filters.
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 // Cache of each course's home-page type (default_view), keyed by course URL,
 // so the redirect guard in scrapeSections queries the API at most once/course.
 const courseDefaultViewCache = new Map();
@@ -591,11 +597,22 @@ const exported = {
   async downloadExternalResource(browser, url, dir, index) {
     let response;
     try {
-      response = await fetch(url, { method: "GET", redirect: "follow" });
+      response = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: { "User-Agent": BROWSER_UA },
+      });
     } catch (e) {
-      return false;
+      response = null;
     }
-    if (!response.ok) return false;
+
+    // A blocked or failed bare fetch (news paywalls / bot filters return 403 to
+    // node-fetch even with a UA) still usually renders in a real browser, which
+    // sends full headers and runs the page's scripts. Fall back to archiving it
+    // as a PDF rather than giving up.
+    if (!response || !response.ok) {
+      return this.archiveWebpageAsPdf(browser, url, dir, `external_${index}`);
+    }
 
     const ct = (response.headers.get("content-type") || "").toLowerCase();
     const cd = response.headers.get("content-disposition") || "";
@@ -631,6 +648,9 @@ const exported = {
     try {
       page = await browser.newPage();
       await page.setViewport({ width: 1280, height: 900 });
+      // Present a normal browser UA; the default headless UA ("HeadlessChrome")
+      // is blocked by some sites (e.g nytimes.com).
+      await page.setUserAgent(BROWSER_UA).catch(() => {});
       // Archive what a reader sees (screen styles), not the print stylesheet.
       await page.emulateMediaType("screen").catch(() => {});
       // Render whatever loads; don't fail the whole thing on a slow idle timeout.
@@ -644,6 +664,31 @@ const exported = {
       } catch (e) {
         // ignore
       }
+
+      // Detect a blocked render. Bot-walled sites (nytimes.com, bloomberg.com,
+      // Cloudflare, DataDome, ...) either serve an empty/near-empty page or a
+      // recognizable interstitial ("Are you a robot?", "Just a moment...",
+      // "enable JavaScript", a captcha). Archiving those produces a junk PDF
+      // that masquerades as the article, so report a failure and let the URL
+      // surface in the skipped report instead.
+      let bodyText = "";
+      try {
+        bodyText = await page.evaluate(
+          () => (document.body && document.body.innerText) || ""
+        );
+      } catch (e) {
+        // ignore
+      }
+      const probe = `${name}\n${bodyText}`.toLowerCase();
+      const blocked =
+        bodyText.trim().length < 200 ||
+        /are you a robot|just a moment|access (?:to this page has been )?denied|enable javascript|please enable (?:js|cookies)|verify you are (?:a )?human|captcha|unusual traffic|request (?:was )?blocked/.test(
+          probe
+        );
+      if (blocked) {
+        return false;
+      }
+
       if (!name) {
         try {
           const u = new URL(url);
@@ -1002,8 +1047,10 @@ const exported = {
    * @param {Array<object>} cookies cookies to authenticate with
    * @param {string} retrieveUrl the Canvas `…/external_tools/retrieve?url=…` link
    * @param {string} dir directory to save the PDF to
-   * @returns {Promise<{handled: boolean, ok?: boolean}>} handled=false means this
-   *   wasn't an HBS launch (caller should treat it as un-downloadable)
+   * @returns {Promise<{handled: boolean, ok?: boolean, reason?: string}>}
+   *   handled=false means this wasn't an HBS launch (caller should treat it as
+   *   un-downloadable); reason, when set, is a specific skip explanation (e.g
+   *   expired coursepack access) for the report.
    */
   async downloadLtiPdf(browser, cookies, retrieveUrl, dir) {
     let targetParam = null;
@@ -1020,10 +1067,51 @@ const exported = {
     let page;
     try {
       page = await this.newPage(browser, cookies, retrieveUrl);
+      await page.setUserAgent(BROWSER_UA).catch(() => {});
       // The launch auto-submits a signed form; give it a moment to settle.
       await page
         .waitForNetworkIdle({ idleTime: 1000, timeout: 15000 })
         .catch(() => {});
+
+      // Perform the signed LTI launch ourselves. Canvas only auto-submits the
+      // launch form for tools placed inline (iframe); this HBS tool is placed
+      // "open in a new window", so the retrieve page just shows a "Load in a new
+      // window" button and never navigates on its own. Submitting the form into
+      // the top frame lands us on the real HBS content page.
+      const launched = await page
+        .evaluate(() => {
+          const f = Array.from(document.querySelectorAll("form")).find((x) =>
+            /hbsp\.harvard\.edu/i.test(x.action)
+          );
+          if (!f) return false;
+          f.target = "_self";
+          f.submit();
+          return true;
+        })
+        .catch(() => false);
+      if (launched) {
+        await page
+          .waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 })
+          .catch(() => {});
+      }
+
+      // HBS shows a plain status page (no download) when the coursepack link's
+      // access window has ended or the item isn't entitled. Detect those so the
+      // skipped report explains the real reason instead of a generic failure.
+      let landedText = "";
+      try {
+        landedText = await page.evaluate(
+          () => (document.body && document.body.innerText) || ""
+        );
+      } catch (e) {
+        // ignore
+      }
+      if (/content access .*has expired/i.test(landedText)) {
+        return { handled: true, ok: false, reason: "HBSP content access expired" };
+      }
+      if (/(not (?:been )?(?:granted|entitled|authorized)|no access|please (?:sign in|log in))/i.test(landedText)) {
+        return { handled: true, ok: false, reason: "HBSP content not accessible" };
+      }
 
       // The HBS page may be the top frame or an embedded tool iframe.
       for (const frame of page.frames()) {
@@ -1188,15 +1276,17 @@ const exported = {
     // and saved manually (the Canvas URL performs the launch while signed in).
     for (const url of lti) {
       let ok = false;
+      let reason = "external tool launch not downloadable";
       try {
         const r = await this.downloadLtiPdf(page.browser(), cookies, url, dir);
         ok = !!(r && r.handled && r.ok);
+        if (r && r.reason) reason = r.reason;
       } catch (e) {
         ok = false;
       }
       if (!ok) {
         problematic.push(url);
-        report.recordFailure(url, "external tool launch not downloadable");
+        report.recordFailure(url, reason);
       }
     }
 
