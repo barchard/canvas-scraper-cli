@@ -8,13 +8,20 @@
     "dev": "node index.js",
     "tui": "node index.js --tui",
     "start": "./canvas-scraper.exe",
-    "build-win": "nexe -t win-x64-latest index.js -o canvas-scraper-win --build",
-    "build-linux": "nexe -t linux-x64-latest index.js -o canvas-scraper-linux --build",
-    "build-mac": "nexe -t mac-x64-latest index.js -o canvas-scraper-mac --build",
+    "test": "node --test",
+    "build-win": "nexe index.js -o dist/canvas-scraper-win.exe --build --verbose",
+    "build-linux": "nexe index.js -o dist/canvas-scraper-linux --build --verbose",
+    "build-mac": "nexe index.js -o dist/canvas-scraper-mac --build --verbose",
     "build": "npm run build-win && npm run build-linux && npm run build-mac"
   },
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "nexe": "4.0.0-rc.7"
+  },
   "dependencies": {
     "commander": "^11.1.0",
     "dotenv-flow": "^4.1.0",

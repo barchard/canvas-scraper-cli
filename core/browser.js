@@ -1,6 +1,7 @@
 import puppeteer from "puppeteer";
 
 import helpers from "../scrapers/helpers.js";
+import { findChrome } from "./chrome.js";
 
 /**
  * Launches Chrome for either a headless scrape or an interactive login.
@@ -22,6 +23,14 @@ export async function launchBrowser(opts = {}) {
   const { headless = "new", userDataDir } = opts;
   const base = { headless };
   if (userDataDir) base.userDataDir = userDataDir;
+
+  // Prefer an explicitly located system Chrome: the standalone builds don't
+  // ship Chromium, and a resolved executablePath is more reliable than the
+  // "chrome" channel across platforms.
+  const chromePath = findChrome();
+  if (chromePath) {
+    return await puppeteer.launch({ ...base, executablePath: chromePath });
+  }
 
   try {
     return await puppeteer.launch({ ...base, channel: "chrome" });
