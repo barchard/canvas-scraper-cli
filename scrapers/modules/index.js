@@ -7,7 +7,7 @@ async function scrapeModule(browser, cookies, dir, sectionName, module) {
   );
 
   const page = await helpers.newPage(browser, cookies, module.url);
-  await page.pdf({
+  await helpers.capturePdf(page, {
     path: `${moduleDir}/MODULE.pdf`,
     format: "Letter",
   });

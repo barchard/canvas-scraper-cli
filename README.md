@@ -117,6 +117,7 @@ Options:
   -v                       scrape the Videos (Panopto) page (default: false)
   -s                       scrape the Study.Net Materials page (default: false)
   -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
+  --dry-run                probe every article/artifact for accessibility and write dry-run-report.csv, without downloading anything (default: false)
   --report                 write a report.csv listing every downloaded asset (default: false)
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
@@ -131,7 +132,7 @@ Commands:
   login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started")
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 
@@ -142,6 +143,27 @@ Add `--tui` (or run `npm run tui`) to drive a scrape from an [Ink](https://githu
 `--login` works inside the TUI too: `node index.js https://<school_domain> --all --tui --login` opens the browser as an interactive first phase, waits (in the UI) for you to press **Enter** once you're signed in, saves your cookies, then rolls straight into the scrape.
 
 The scraping logic itself lives in a UI-agnostic core (`core/scrape.js`, `runScrape(url, options, hooks)`); the CLI, the TUI, and a future GUI are all thin front-ends over it, so the three stay in sync automatically.
+
+### Dry run (`--dry-run`)
+
+Add `--dry-run` to find out **which articles and artifacts are inaccessible before committing to a full download**. The scraper walks the same courses, tabs, and links it normally would — Canvas pages, embedded files, external documents and web pages, Panopto/YouTube videos, Harvard Business Publishing PDFs, and Study.Net materials — but instead of saving anything it only *probes* each item for accessibility:
+
+- Canvas files are fetched and checked (a locked file returns HTTP 403, a broken link 404, an invalid session 401).
+- Pages are checked by their load status (a disabled tab or restricted page is flagged).
+- External documents and web pages are probed and paywalled / bot-walled articles are flagged.
+- Videos are resolved with `yt-dlp --simulate` (no media is downloaded).
+
+**Nothing is written to disk** — no PDFs, files, or videos, and existing output folders are left untouched. Instead the run writes a single `dry-run-report.csv` into the output directory and prints a summary, with one row per probed item:
+
+| Column | Meaning |
+| --- | --- |
+| `status` | `inaccessible` or `accessible` |
+| `kind` | what the item is (`file`, `page`, `webpage`, `video`, `study.net`, `lti-pdf`, …) |
+| `url` | the source URL |
+| `reason` | why an inaccessible item couldn't be downloaded (e.g. "locked/restricted file (HTTP 403)", "paywalled article") |
+| `course_name` / `course_url` | the course it belongs to |
+
+Inaccessible items are listed first (and echoed to the console) so you can see at a glance what a real run would miss. Combine it with the content flags to narrow the probe (e.g. `--all --dry-run`, or `-v --dry-run` to only check videos); on its own with a URL it probes everything. `--dry-run` turns the recorder on itself, so you don't also need `--report`.
 
 ### Asset report (`--report`)
 
@@ -169,6 +191,25 @@ Alongside it, a second file — `report-skipped.csv` — lists every asset that 
 | `course_url` | that course's Canvas URL |
 
 `report-skipped.csv` is only written when there is at least one skipped/failed download.
+
+### Error tracking (`errors.csv`)
+
+Every run — no flag required — records the errors it hits (a page that wouldn't load, a submission it couldn't scrape, a browser timeout, etc.) and writes them to `errors.csv` in the output directory so they can be tracked and resolved. It's written only when at least one error occurred, and it's flushed even if the run itself fails partway. Each row has:
+
+| Column | Description |
+| --- | --- |
+| `time` | when the error was logged (ISO timestamp) |
+| `item` | what it was about (e.g. `ASSIGNMENT '15.716 Session 5 — Pre-work'`) |
+| `error` | the short, logged error message |
+| `error_type` | the underlying error's class (e.g. `TimeoutError`, `ProtocolError`, `TypeError`) |
+| `detail` | the underlying cause message (e.g. `Requesting main frame too early!`, `Target.createTarget timed out …`) |
+| `course_name` | the course being scraped |
+| `course_url` | that course's Canvas URL |
+| `stack` | the full stack trace (file + line) of the underlying error, when available |
+
+Together these give a developer (or an LLM) enough to locate and fix a failure: `error` + `item` say what the scraper was doing, `error_type` + `detail` say what went wrong, and `stack` points at the exact code path. The only thing not captured is the failing item's own URL (the `course_url` and the human-readable `item` name are recorded instead).
+
+Transient browser hiccups (`Target.createTarget timed out`, `Requesting main frame too early!`) are automatically retried before they're logged as errors, and the headless browser is launched with a higher `protocolTimeout` (5 min) so opening a tab or rendering a large page under load no longer aborts the scrape.
 
 ### LLM Wiki layout (`--wiki`)
 

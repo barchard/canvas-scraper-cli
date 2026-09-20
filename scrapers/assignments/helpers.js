@@ -9,9 +9,9 @@ const exported = {
    * @returns {Promise<Array<string>>} array of problematic files
    */
   async scrapeDescription(page, cookies, dir) {
-    // print assignment preview
-    fs.mkdirSync(`${dir}`);
-    await page.pdf({
+    // print assignment preview (a dry-run writes nothing, so skip the folder)
+    if (!helpers.dryRun) fs.mkdirSync(`${dir}`);
+    await helpers.capturePdf(page, {
       path: `${dir}/ASSIGNMENT.pdf`,
       format: "Letter",
     });
@@ -46,7 +46,7 @@ const exported = {
 
     let newPage = await helpers.newPage(page.browser(), cookies, link);
     try {
-      await newPage.pdf({
+      await helpers.capturePdf(newPage, {
         path: `${dir}/SUBMISSIONDETAILS.pdf`,
         format: "Letter",
       });

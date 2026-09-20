@@ -362,6 +362,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
           loginMode: "fresh",
           a: false, m: false, q: false, v: false, s: false,
           t: false, report: false, wiki: false, octarine: false,
+          dryRun: false,
           all: false, tui: false,
           courseIds: null,
           _menu: true,
@@ -675,6 +676,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     cfg.wiki = values.includes("wiki");
     cfg.octarine = values.includes("octarine");
     cfg.t = values.includes("t");
+    cfg.dryRun = values.includes("dryRun");
     setStep("scraping");
   };
 
@@ -767,6 +769,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     view = h(MultiSelectPrompt, {
       message: "Any extras? (optional)",
       items: [
+        { label: "Dry run — find inaccessible articles/artifacts, download nothing (--dry-run)", value: "dryRun" },
         { label: "CSV report of downloaded assets (--report)", value: "report" },
         { label: "Organize as an LLM Wiki (--wiki)", value: "wiki" },
         { label: "Organize as an Octarine workspace (--octarine)", value: "octarine" },
@@ -832,8 +835,20 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       ? h(
           Box,
           { flexDirection: "column", marginTop: 1 },
-          h(Text, { color: "green" }, `Scraped ${summary.courseCount} course(s).`),
-          h(Text, null, `Output: ${summary.outputDir}`)
+          h(
+            Text,
+            { color: "green" },
+            summary.dryRun
+              ? `Dry run complete — probed ${summary.courseCount} course(s), nothing downloaded.`
+              : `Scraped ${summary.courseCount} course(s).`
+          ),
+          h(
+            Text,
+            null,
+            summary.dryRun
+              ? `Report: ${summary.outputDir}/dry-run-report.csv`
+              : `Output: ${summary.outputDir}`
+          )
         )
       : null;
 
