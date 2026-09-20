@@ -1658,10 +1658,17 @@ const exported = {
     // Guarded so a bad record never breaks logging.
     if (type === "ERROR") {
       try {
+        const isErr = additional instanceof Error;
         report.recordError({
           name,
           message,
           detail: this.describeErrorDetail(additional),
+          // Capture the error class and full stack (file + line) so a row has
+          // enough context for a developer/LLM to locate and fix the cause.
+          errorType: isErr
+            ? additional.name || (additional.constructor && additional.constructor.name) || "Error"
+            : "",
+          stack: isErr ? additional.stack || "" : "",
         });
       } catch (e) {
         // never let error tracking interfere with logging
@@ -1676,16 +1683,15 @@ const exported = {
   },
 
   /**
-   * Renders the `additional` argument of print() as a single-line string for the
-   * errors CSV (an Error's message, or the stringified value).
+   * Renders the `additional` argument of print() as the human-readable "detail"
+   * for the errors CSV: an Error's message (the stack is captured separately),
+   * or the stringified value.
    * @param {any} additional
    * @returns {string}
    */
   describeErrorDetail(additional) {
     if (additional == null) return "";
-    if (additional instanceof Error) {
-      return additional.message || additional.stack || String(additional);
-    }
+    if (additional instanceof Error) return additional.message || String(additional);
     return String(additional);
   },
 

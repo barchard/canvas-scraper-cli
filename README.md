@@ -200,10 +200,14 @@ Every run — no flag required — records the errors it hits (a page that would
 | --- | --- |
 | `time` | when the error was logged (ISO timestamp) |
 | `item` | what it was about (e.g. `ASSIGNMENT '15.716 Session 5 — Pre-work'`) |
-| `error` | the short error message |
-| `detail` | the underlying cause (e.g. `Requesting main frame too early!`, `Target.createTarget timed out …`) |
+| `error` | the short, logged error message |
+| `error_type` | the underlying error's class (e.g. `TimeoutError`, `ProtocolError`, `TypeError`) |
+| `detail` | the underlying cause message (e.g. `Requesting main frame too early!`, `Target.createTarget timed out …`) |
 | `course_name` | the course being scraped |
 | `course_url` | that course's Canvas URL |
+| `stack` | the full stack trace (file + line) of the underlying error, when available |
+
+Together these give a developer (or an LLM) enough to locate and fix a failure: `error` + `item` say what the scraper was doing, `error_type` + `detail` say what went wrong, and `stack` points at the exact code path. The only thing not captured is the failing item's own URL (the `course_url` and the human-readable `item` name are recorded instead).
 
 Transient browser hiccups (`Target.createTarget timed out`, `Requesting main frame too early!`) are automatically retried before they're logged as errors, and the headless browser is launched with a higher `protocolTimeout` (5 min) so opening a tab or rendering a large page under load no longer aborts the scrape.
 

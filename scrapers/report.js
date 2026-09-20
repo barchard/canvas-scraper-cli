@@ -127,14 +127,18 @@ const report = {
    * @param {object} fields
    * @param {string} [fields.name] the item the error is about (e.g "ASSIGNMENT 'X'")
    * @param {string} [fields.message] the short error message that was logged
-   * @param {string} [fields.detail] additional detail (an error message/stack)
+   * @param {string} [fields.detail] the underlying error message
+   * @param {string} [fields.errorType] the error class (e.g "TimeoutError")
+   * @param {string} [fields.stack] the full stack trace (file + line), if any
    */
-  recordError({ name, message, detail } = {}) {
+  recordError({ name, message, detail, errorType, stack } = {}) {
     this.errors.push({
       time: new Date().toISOString(),
       name: name || "",
       message: message || "",
       detail: detail || "",
+      errorType: errorType || "",
+      stack: stack || "",
       courseName: this.current.courseName,
       courseUrl: this.current.courseUrl,
     });
@@ -230,11 +234,29 @@ const report = {
    */
   writeErrors(filePath) {
     if (!this.errors.length) return 0;
-    const header = ["time", "item", "error", "detail", "course_name", "course_url"];
+    const header = [
+      "time",
+      "item",
+      "error",
+      "error_type",
+      "detail",
+      "course_name",
+      "course_url",
+      "stack",
+    ];
     const lines = [header.map(csvField).join(",")];
     for (const e of this.errors) {
       lines.push(
-        [e.time, e.name, e.message, e.detail, e.courseName, e.courseUrl]
+        [
+          e.time,
+          e.name,
+          e.message,
+          e.errorType,
+          e.detail,
+          e.courseName,
+          e.courseUrl,
+          e.stack,
+        ]
           .map(csvField)
           .join(",")
       );
