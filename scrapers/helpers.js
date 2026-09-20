@@ -435,6 +435,19 @@ const exported = {
   },
 
   /**
+   * Whether a hostname is study.net or a subdomain of it. Study.Net material
+   * links embedded in Canvas content (e.g …/remote/view/…) can't be fetched by a
+   * plain external download — they require the study.net session that only the
+   * signed LTI launch establishes — so they're handled by the -s Study.Net
+   * Materials scraper instead of the generic external-resource path.
+   * @param {string} hostname lowercase hostname
+   * @returns {boolean}
+   */
+  isStudyNetHost(hostname) {
+    return hostname === "study.net" || hostname.endsWith(".study.net");
+  },
+
+  /**
    * Explains, for the skipped report, why a non-2xx HTTP response means the file
    * couldn't be fetched. A Canvas file 403 almost always means the file is locked
    * or restricted by the instructor (the session is still valid — other files in
@@ -1535,6 +1548,21 @@ const exported = {
       } catch (e) {
         problematic.push(url);
         report.recordFailure(url, "invalid URL", { destDir: dir });
+        continue;
+      }
+
+      // Study.Net viewer links embedded in Canvas content (e.g …/remote/view/…)
+      // can't be fetched here: they need the study.net session that only the
+      // signed LTI launch establishes. The -s Study.Net Materials scraper opens
+      // that tab and downloads these same materials into STUDYNET/. Record a
+      // pointer to that flow so the item is accounted for, but don't count it as
+      // a hard download failure — it's delivered by -s, not missing.
+      if (this.isStudyNetHost(hostname)) {
+        report.recordFailure(
+          url,
+          "Study.Net material — download via the Study.Net Materials tab (run with -s)",
+          { destDir: dir }
+        );
         continue;
       }
 
