@@ -21,6 +21,10 @@ const report = {
   skippedIndex: new Map(),
   // Same idea for `available`: one row per url+course.
   availableIndex: new Map(),
+  // Errors encountered during a run (every helpers.print("ERROR", ...) line).
+  // Tracked independently of `enabled` so errors are always available to write
+  // to errors.csv, even without --report.
+  errors: [],
   current: { courseName: "", courseUrl: "" },
 
   /** Turns recording on. No-op recorders stay cheap when the flag is off. */
@@ -117,6 +121,26 @@ const report = {
   },
 
   /**
+   * Records an error raised during the run so it can be written to errors.csv and
+   * tracked/resolved later. Always on (not gated by `enabled`): error tracking
+   * shouldn't require --report. Attributed to the current course, like record().
+   * @param {object} fields
+   * @param {string} [fields.name] the item the error is about (e.g "ASSIGNMENT 'X'")
+   * @param {string} [fields.message] the short error message that was logged
+   * @param {string} [fields.detail] additional detail (an error message/stack)
+   */
+  recordError({ name, message, detail } = {}) {
+    this.errors.push({
+      time: new Date().toISOString(),
+      name: name || "",
+      message: message || "",
+      detail: detail || "",
+      courseName: this.current.courseName,
+      courseUrl: this.current.courseUrl,
+    });
+  },
+
+  /**
    * Records every file that appeared under `dir` between `before` and now. Used
    * for yt-dlp downloads, where the exact output filenames (and playlist
    * subfolders) aren't known ahead of time.
@@ -195,6 +219,28 @@ const report = {
     }
     fs.writeFileSync(filePath, lines.join("\r\n") + "\r\n");
     return this.skipped.length;
+  },
+
+  /**
+   * Writes the errors encountered during the run to `filePath` as CSV. No-op
+   * (returns 0) when no errors were recorded, so the caller can skip an empty
+   * file. Not gated by `enabled` — errors are always tracked.
+   * @param {string} filePath where to write the CSV
+   * @returns {number} number of error rows written
+   */
+  writeErrors(filePath) {
+    if (!this.errors.length) return 0;
+    const header = ["time", "item", "error", "detail", "course_name", "course_url"];
+    const lines = [header.map(csvField).join(",")];
+    for (const e of this.errors) {
+      lines.push(
+        [e.time, e.name, e.message, e.detail, e.courseName, e.courseUrl]
+          .map(csvField)
+          .join(",")
+      );
+    }
+    fs.writeFileSync(filePath, lines.join("\r\n") + "\r\n");
+    return this.errors.length;
   },
 
   /**

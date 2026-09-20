@@ -192,6 +192,21 @@ Alongside it, a second file — `report-skipped.csv` — lists every asset that 
 
 `report-skipped.csv` is only written when there is at least one skipped/failed download.
 
+### Error tracking (`errors.csv`)
+
+Every run — no flag required — records the errors it hits (a page that wouldn't load, a submission it couldn't scrape, a browser timeout, etc.) and writes them to `errors.csv` in the output directory so they can be tracked and resolved. It's written only when at least one error occurred, and it's flushed even if the run itself fails partway. Each row has:
+
+| Column | Description |
+| --- | --- |
+| `time` | when the error was logged (ISO timestamp) |
+| `item` | what it was about (e.g. `ASSIGNMENT '15.716 Session 5 — Pre-work'`) |
+| `error` | the short error message |
+| `detail` | the underlying cause (e.g. `Requesting main frame too early!`, `Target.createTarget timed out …`) |
+| `course_name` | the course being scraped |
+| `course_url` | that course's Canvas URL |
+
+Transient browser hiccups (`Target.createTarget timed out`, `Requesting main frame too early!`) are automatically retried before they're logged as errors, and the headless browser is launched with a higher `protocolTimeout` (5 min) so opening a tab or rendering a large page under load no longer aborts the scrape.
+
 ### LLM Wiki layout (`--wiki`)
 
 Add `--wiki` to reorganize the output into the [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) popularized by Andrej Karpathy — a layout that separates immutable source material from LLM-generated synthesis, so you can point an agent (Claude Code, Codex, …) at the folder and have it build a knowledge base instead of re-reading every file on each query:

@@ -272,6 +272,27 @@ function writeReports(dir) {
 }
 
 /**
+ * Writes errors.csv listing every error raised during the run, so failures can
+ * be tracked and resolved. No-op when there were no errors (or no output dir).
+ * Best-effort: its own failure is swallowed so it can run inside a finally.
+ */
+function writeErrorsReport(dir) {
+  if (!dir || !report.errors.length) return;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const errorsPath = `${dir}/errors.csv`;
+    const count = report.writeErrors(errorsPath);
+    if (count > 0) {
+      // helpers.print only records ERROR lines, so a NOTE/WARNING here won't
+      // append to the very list we just wrote.
+      helpers.print("NOTE", "ERRORS", `Wrote ${count} error(s) to ${errorsPath}`, 0);
+    }
+  } catch (e) {
+    helpers.print("WARNING", "ERRORS", "Could not write errors.csv", 0, e.message || e);
+  }
+}
+
+/**
  * Writes the dry-run accessibility report (dry-run-report.csv) and prints a
  * summary of how many articles/artifacts were accessible vs inaccessible.
  * Errors are logged, not thrown.
@@ -332,7 +353,12 @@ export async function runScrape(url, options, hooks = {}) {
   const prevDryRun = helpers.dryRun;
   helpers.setDryRun(!!options.dryRun);
 
+  // Reset per-run error tracking so errors.csv reflects only this run.
+  report.errors = [];
+
   let browser;
+  // Hoisted so the finally can always write errors.csv, even if the run throws.
+  let dir = options.output;
   try {
     const { domain, courseId } = parseTarget(url);
     const cookies = readCookies(options.cookies);
@@ -362,7 +388,7 @@ export async function runScrape(url, options, hooks = {}) {
     // Ensure the main output folder exists. It holds one self-contained
     // subfolder per course, so we don't wipe it here (that would delete sibling
     // courses from earlier runs) — each course's own folder is refreshed instead.
-    const dir = options.output;
+    dir = options.output;
     fs.mkdirSync(dir, { recursive: true });
 
     const toScrape = resolveToScrape(options);
@@ -521,6 +547,9 @@ export async function runScrape(url, options, hooks = {}) {
     return summary;
   } finally {
     if (browser) await browser.close().catch(() => {});
+    // Always flush tracked errors to errors.csv (best-effort). This runs even
+    // when the scrape threw, so a failed run still leaves a record to resolve.
+    writeErrorsReport(dir);
     helpers.setPrinter(prevPrinter);
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);

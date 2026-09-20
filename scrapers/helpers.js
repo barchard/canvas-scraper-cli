@@ -24,18 +24,62 @@ const courseDefaultViewCache = new Map();
 
 const exported = {
   /**
-   * Creates a new page with the given cookies and navigates to the given URL
+   * Creates a new page with the given cookies and navigates to the given URL.
+   *
+   * Opening a target (browser.newPage) and the first navigation are the two
+   * places Puppeteer surfaces transient protocol failures under load —
+   * "Target.createTarget timed out" and "Requesting main frame too early!" —
+   * which abort a whole assignment/module. We retry those (with a fresh target
+   * each time and a short backoff) instead of letting one flaky tab kill the run.
    * @param {Browser} browser puppeteer browser
    * @param {Object} cookies cookies to use
    * @param {string} url URL to navigate to
    * @returns {Promise<Page>} new page
    */
   async newPage(browser, cookies, url) {
-    const page = await browser.newPage();
-    await page.setCookie(...cookies);
-    const response = await page.goto(url);
-    page.status = response.status();
-    return page;
+    const attempts = 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let page;
+      try {
+        page = await browser.newPage();
+        if (cookies && cookies.length) await page.setCookie(...cookies);
+        const response = await page.goto(url, { timeout: 60000 });
+        // A same-document navigation (or a 204/aborted request) yields no
+        // response; treat an unknown status as 0 so callers see "not 200"
+        // rather than throwing on response.status().
+        page.status = response ? response.status() : 0;
+        return page;
+      } catch (e) {
+        lastErr = e;
+        if (page) await page.close().catch(() => {});
+        // Only retry the transient protocol/target failures; a real error (bad
+        // URL, etc.) should surface immediately.
+        if (attempt === attempts || !this.isTransientPageError(e)) throw e;
+        this.print(
+          "WARNING",
+          "BROWSER",
+          `Transient page load failure (attempt ${attempt}/${attempts}); retrying ${url}`,
+          1,
+          e.message
+        );
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+    throw lastErr;
+  },
+
+  /**
+   * Whether an error thrown while opening/navigating a page is a transient
+   * browser-protocol hiccup worth retrying (rather than a real failure).
+   * @param {any} e
+   * @returns {boolean}
+   */
+  isTransientPageError(e) {
+    const msg = (e && e.message) || String(e || "");
+    return /Target\.createTarget timed out|Requesting main frame too early|Navigation timeout|Runtime\.callFunctionOn timed out|Protocol error|Target closed|Session closed|socket hang up|net::ERR_/i.test(
+      msg
+    );
   },
 
   /**
@@ -1610,12 +1654,39 @@ const exported = {
 
   print(type, name, message, indent = 0, additional = null) {
     const line = `[${type}]${"  ".repeat(indent)} ${name} | ${message}`;
+    // Track every error so it can be written to errors.csv and resolved later.
+    // Guarded so a bad record never breaks logging.
+    if (type === "ERROR") {
+      try {
+        report.recordError({
+          name,
+          message,
+          detail: this.describeErrorDetail(additional),
+        });
+      } catch (e) {
+        // never let error tracking interfere with logging
+      }
+    }
     if (this.printer) {
       this.printer({ type, name, message, indent, additional, line });
       return;
     }
     console.log(line);
     if (additional) console.log(additional);
+  },
+
+  /**
+   * Renders the `additional` argument of print() as a single-line string for the
+   * errors CSV (an Error's message, or the stringified value).
+   * @param {any} additional
+   * @returns {string}
+   */
+  describeErrorDetail(additional) {
+    if (additional == null) return "";
+    if (additional instanceof Error) {
+      return additional.message || additional.stack || String(additional);
+    }
+    return String(additional);
   },
 
   /**
