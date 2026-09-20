@@ -13,9 +13,14 @@ const report = {
   enabled: false,
   rows: [],
   skipped: [],
+  // Accessible artifacts/articles recorded during a --dry-run probe (no bytes
+  // are downloaded, so these can't be captured via record()/statSync).
+  available: [],
   // Index into `skipped` keyed by url+course, so the same asset attempted more
   // than once in a run (e.g referenced from several modules) yields one row.
   skippedIndex: new Map(),
+  // Same idea for `available`: one row per url+course.
+  availableIndex: new Map(),
   current: { courseName: "", courseUrl: "" },
 
   /** Turns recording on. No-op recorders stay cheap when the flag is off. */
@@ -87,6 +92,28 @@ const report = {
     };
     this.skippedIndex.set(key, row);
     this.skipped.push(row);
+  },
+
+  /**
+   * Records an artifact/article that a --dry-run probe found to be accessible
+   * (it would have downloaded successfully). Attributed to the current course,
+   * like record(). Deduped per url+course so an item referenced from several
+   * places yields one row. `kind` is a short label (e.g "file", "page", "video").
+   * @param {string} url source URL of the accessible asset
+   * @param {string} [kind] short description of the asset kind
+   */
+  recordAvailable(url, kind) {
+    if (!this.enabled) return;
+    const key = `${url || ""}\n${this.current.courseUrl}`;
+    if (this.availableIndex.has(key)) return;
+    const row = {
+      url: url || "",
+      kind: kind || "",
+      courseName: this.current.courseName,
+      courseUrl: this.current.courseUrl,
+    };
+    this.availableIndex.set(key, row);
+    this.available.push(row);
   },
 
   /**
@@ -168,6 +195,39 @@ const report = {
     }
     fs.writeFileSync(filePath, lines.join("\r\n") + "\r\n");
     return this.skipped.length;
+  },
+
+  /**
+   * Writes the combined --dry-run accessibility report to `filePath` as CSV:
+   * every probed artifact/article with a `status` of "inaccessible" or
+   * "accessible". Inaccessible rows are listed first (they're what a dry-run is
+   * for) and carry the reason they couldn't be downloaded.
+   * @param {string} filePath where to write the CSV
+   * @returns {{total: number, inaccessible: number, accessible: number}}
+   */
+  writeDryRun(filePath) {
+    const header = ["status", "kind", "url", "reason", "course_name", "course_url"];
+    const lines = [header.map(csvField).join(",")];
+    for (const r of this.skipped) {
+      lines.push(
+        ["inaccessible", "", r.url, r.reason, r.courseName, r.courseUrl]
+          .map(csvField)
+          .join(",")
+      );
+    }
+    for (const r of this.available) {
+      lines.push(
+        ["accessible", r.kind, r.url, "", r.courseName, r.courseUrl]
+          .map(csvField)
+          .join(",")
+      );
+    }
+    fs.writeFileSync(filePath, lines.join("\r\n") + "\r\n");
+    return {
+      total: this.skipped.length + this.available.length,
+      inaccessible: this.skipped.length,
+      accessible: this.available.length,
+    };
   },
 };
 

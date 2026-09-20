@@ -7,7 +7,7 @@ async function scrapeQuiz(browser, cookies, dir, sectionName, quiz) {
   );
 
   const page = await helpers.newPage(browser, cookies, quiz.url);
-  await page.pdf({
+  await helpers.capturePdf(page, {
     path: `${quizDir}/QUIZ.pdf`,
     format: "Letter",
   });

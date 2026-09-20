@@ -201,9 +201,13 @@ async function scrapeCourse(
 ) {
   helpers.print("INFO", "COURSE", `Scraping ${courseUrl}`, 0);
   // Refresh just this course's own folder so re-scraping a course replaces its
-  // contents without disturbing sibling courses in the main output folder.
-  if (fs.existsSync(courseDir)) fs.rmSync(courseDir, { recursive: true, force: true });
-  fs.mkdirSync(courseDir, { recursive: true });
+  // contents without disturbing sibling courses in the main output folder. A
+  // dry-run writes nothing, so it must never wipe or create the folder (that
+  // would destroy the results of a previous real scrape).
+  if (!helpers.dryRun) {
+    if (fs.existsSync(courseDir)) fs.rmSync(courseDir, { recursive: true, force: true });
+    fs.mkdirSync(courseDir, { recursive: true });
+  }
 
   // Attribute every asset downloaded below to this course in the report.
   report.setCourse(courseName, courseUrl);
@@ -217,6 +221,10 @@ async function scrapeCourse(
       0,
       http.STATUS_CODES[page.status]
     );
+    // In a dry-run, an unreachable homepage is itself an inaccessible article.
+    if (helpers.dryRun) {
+      report.recordFailure(courseUrl, helpers.describeHttpFailure(courseUrl, page.status));
+    }
     await page.close().catch(() => {});
     return;
   }
@@ -225,7 +233,7 @@ async function scrapeCourse(
     const title = await page.title().catch(() => "");
     if (title) report.setCourse(title.trim(), courseUrl);
   }
-  await page.pdf({ path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
+  await helpers.capturePdf(page, { path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
   await page.close().catch(() => {});
 
   for (const [key, label, fn] of PHASES) {
@@ -264,6 +272,35 @@ function writeReports(dir) {
 }
 
 /**
+ * Writes the dry-run accessibility report (dry-run-report.csv) and prints a
+ * summary of how many articles/artifacts were accessible vs inaccessible.
+ * Errors are logged, not thrown.
+ */
+function writeDryRunReport(dir) {
+  try {
+    const reportPath = `${dir}/dry-run-report.csv`;
+    const { total, inaccessible, accessible } = report.writeDryRun(reportPath);
+    helpers.print(
+      "NOTE",
+      "DRY-RUN",
+      `Probed ${total} item(s): ${accessible} accessible, ${inaccessible} inaccessible.`,
+      0
+    );
+    helpers.print("NOTE", "DRY-RUN", `Wrote ${reportPath}`, 0);
+    // Echo the inaccessible items so they're visible without opening the CSV.
+    if (inaccessible > 0) {
+      helpers.print("WARNING", "DRY-RUN", "Inaccessible articles/artifacts:", 0);
+      for (const r of report.skipped) {
+        const where = r.courseName ? ` [${r.courseName}]` : "";
+        helpers.print("WARNING", "DRY-RUN", `  ${r.url} — ${r.reason}${where}`, 0);
+      }
+    }
+  } catch (e) {
+    helpers.print("ERROR", "DRY-RUN", "Could not write dry-run-report.csv", 0, e);
+  }
+}
+
+/**
  * Runs a full scrape described by `options`, reporting progress through `hooks`.
  * @param {string} url the target Canvas URL
  * @param {object} options scrape options (a/m/q/v/s, all, output, cookies, t,
@@ -289,6 +326,12 @@ export async function runScrape(url, options, hooks = {}) {
   const prevProgressSink = helpers.progressSink;
   helpers.setProgressSink(makeProgressSink(hooks, onProgress));
 
+  // A --dry-run probes every article/artifact for accessibility without writing
+  // anything to disk (no PDFs, files, or videos). Turn on the recorder so the
+  // probe results are collected, and route byte-writing helpers to record-only.
+  const prevDryRun = helpers.dryRun;
+  helpers.setDryRun(!!options.dryRun);
+
   let browser;
   try {
     const { domain, courseId } = parseTarget(url);
@@ -309,8 +352,10 @@ export async function runScrape(url, options, hooks = {}) {
     }
 
     // The report recorder is the data source for --report and for the source
-    // links in --wiki / --octarine, so enable it for any of the three.
-    if (options.report || options.wiki || options.octarine) report.enable();
+    // links in --wiki / --octarine, so enable it for any of the three. A
+    // --dry-run also needs it — the probe results are its whole output.
+    if (options.report || options.wiki || options.octarine || options.dryRun)
+      report.enable();
 
     emit(`FLAGS: ${JSON.stringify(options)}`);
 
@@ -407,6 +452,17 @@ export async function runScrape(url, options, hooks = {}) {
     await browser.close();
     browser = null;
 
+    // A dry-run's whole output is the accessibility report; write it and skip the
+    // download report and the wiki/octarine reorganizers (there's nothing on disk
+    // to organize).
+    if (options.dryRun) {
+      writeDryRunReport(dir);
+      const summary = { outputDir: dir, courseCount, single: !!courseId, dryRun: true };
+      onProgress({ type: "done", summary });
+      emit("*** DONE (dry run — nothing downloaded) ***");
+      return summary;
+    }
+
     if (options.report) writeReports(dir);
 
     // opt-in reorganization into the LLM Wiki layout (raw/ + index.md + wiki/).
@@ -467,6 +523,7 @@ export async function runScrape(url, options, hooks = {}) {
     if (browser) await browser.close().catch(() => {});
     helpers.setPrinter(prevPrinter);
     helpers.setProgressSink(prevProgressSink);
+    helpers.setDryRun(prevDryRun);
   }
 }
 

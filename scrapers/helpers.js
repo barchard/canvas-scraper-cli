@@ -130,11 +130,25 @@ const exported = {
       if (extracted) filename = this.stripInvalid(extracted);
     }
 
-    const filePath = path.join(dir, filename);
-    await this.streamToFile(response, filePath, filename);
     // No content-disposition filename means the server likely returned an error
     // page instead of the file — the caller treats this as a failed download.
     const ok = filename !== backupName;
+
+    // Dry-run: the fetch above already proved accessibility; record it and skip
+    // writing any bytes to disk.
+    if (this.dryRun) {
+      try {
+        response.body?.destroy();
+      } catch (e) {
+        // ignore
+      }
+      if (ok) report.recordAvailable(url, "file");
+      else report.recordFailure(url, "no file returned (missing content-disposition)");
+      return ok;
+    }
+
+    const filePath = path.join(dir, filename);
+    await this.streamToFile(response, filePath, filename);
     if (ok) report.record(filePath, url);
     else report.recordFailure(url, "no file returned (missing content-disposition)");
     return ok;
@@ -642,6 +656,17 @@ const exported = {
 
     filename = this.stripInvalid(filename);
 
+    // Dry-run: the response is accessible; record it and don't write the file.
+    if (this.dryRun) {
+      try {
+        response.body?.destroy();
+      } catch (e) {
+        // ignore
+      }
+      report.recordAvailable(url, "file");
+      return true;
+    }
+
     const filePath = path.join(dir, filename);
     await this.streamToFile(response, filePath, filename);
     report.record(filePath, url);
@@ -761,6 +786,13 @@ const exported = {
         return false;
       }
 
+      // Dry-run: the page rendered and isn't a bot wall, so it's an accessible
+      // article — record it and skip writing the PDF.
+      if (this.dryRun) {
+        report.recordAvailable(url, "webpage");
+        return true;
+      }
+
       if (!name) {
         try {
           const u = new URL(url);
@@ -788,6 +820,51 @@ const exported = {
   },
 
   /**
+   * Probes a video for accessibility with yt-dlp's --simulate (used by --dry-run):
+   * resolves the video/playlist and its formats without downloading any media.
+   * Records the result via `report` and returns whether it looks accessible.
+   * @param {string} url video URL (viewer/embed/watch/folder page)
+   * @param {Array<object>} [cookies] cookies to authenticate with
+   * @returns {Promise<boolean>} whether the video appears accessible
+   */
+  async probeVideo(url, cookies) {
+    const args = ["--simulate", "--no-warnings", "--quiet"];
+    if (this.videoUrlKind(url) === "single") args.push("--no-playlist");
+    const cookieFile = this.getYtDlpCookieFile(cookies);
+    if (cookieFile) args.push("--cookies", cookieFile);
+    args.push(url);
+
+    return await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn("yt-dlp", args, { windowsHide: true });
+      } catch (e) {
+        this.print("WARNING", "YT-DLP", `Could not probe ${url}`, 0, e.message);
+        return resolve(false);
+      }
+      child.stdout && child.stdout.on("data", () => {});
+      child.stderr && child.stderr.on("data", () => {});
+      child.on("error", (e) => {
+        if (e.code === "ENOENT" && !warnedMissingYtDlp) {
+          warnedMissingYtDlp = true;
+          this.print(
+            "WARNING",
+            "YT-DLP",
+            "yt-dlp is not installed or not on PATH. Skipping video probes. Install it (e.g 'brew install yt-dlp').",
+            0
+          );
+        }
+        resolve(false);
+      });
+      child.on("close", (code) => {
+        const ok = code === 0;
+        if (ok) report.recordAvailable(url, "video");
+        resolve(ok);
+      });
+    });
+  },
+
+  /**
    * Downloads a video as mp4 using yt-dlp (YouTube, Panopto, etc.). When cookies
    * are provided, they are passed to yt-dlp so login-gated providers (Panopto)
    * can authenticate.
@@ -797,6 +874,11 @@ const exported = {
    * @returns {Promise<boolean>} whether the video was downloaded successfully
    */
   async downloadVideo(url, dir, cookies) {
+    // Dry-run: ask yt-dlp to --simulate the download (resolve the video and its
+    // formats without fetching any media) so we learn whether it's accessible
+    // without downloading gigabytes.
+    if (this.dryRun) return this.probeVideo(url, cookies);
+
     const kind = this.videoUrlKind(url);
     // Use an absolute output path: on Windows yt-dlp only applies extended-length
     // (\\?\) path handling to absolute paths, so a relative -o would hit the
@@ -1270,6 +1352,13 @@ const exported = {
         if (!filename) filename = result.availabilityId || "document";
         if (!/\.pdf$/i.test(filename)) filename += ".pdf";
 
+        // Dry-run: the launch produced a downloadable PDF, so it's accessible;
+        // record it and don't write the file.
+        if (this.dryRun) {
+          report.recordAvailable(retrieveUrl, "lti-pdf");
+          return { handled: true, ok: true };
+        }
+
         const buf = Buffer.from(result.base64, "base64");
         const filePath = path.join(dir, this.stripInvalid(filename));
         fs.writeFileSync(filePath, buf);
@@ -1416,6 +1505,54 @@ const exported = {
     this.progressSink = fn || null;
   },
 
+  // When true (a --dry-run), no bytes are written to disk: pages, files and
+  // videos are only probed for accessibility and recorded via `report`, so the
+  // run surfaces which articles/artifacts are inaccessible without downloading
+  // anything. Set/reset by runScrape (like printer/progressSink).
+  dryRun: false,
+
+  /** Turns dry-run mode on or off. */
+  setDryRun(on) {
+    this.dryRun = !!on;
+  },
+
+  /**
+   * Captures a page as a PDF, or — in dry-run — probes the page's accessibility
+   * and records it instead of writing anything. Every scraper that would save a
+   * page PDF goes through here, so dry-run turns each into an article probe.
+   * @param {Page} page a page opened via newPage (carries page.status)
+   * @param {object} options puppeteer page.pdf() options (incl. the output path)
+   * @param {string} [kind] short label for the dry-run report (default "page")
+   */
+  async capturePdf(page, options, kind = "page") {
+    if (this.dryRun) {
+      this.probePage(page, kind);
+      return;
+    }
+    await page.pdf(options);
+  },
+
+  /**
+   * Records a loaded page as an accessible/inaccessible "article" for the
+   * dry-run report, based on the HTTP status newPage captured.
+   * @param {Page} page a page opened via newPage (carries page.status)
+   * @param {string} [kind] short label for the report
+   */
+  probePage(page, kind = "page") {
+    let url = "";
+    try {
+      url = page.url();
+    } catch (e) {
+      // page may be closing; fall back to an empty url
+    }
+    const status = page.status;
+    if (status && status !== 200) {
+      report.recordFailure(url, this.describeHttpFailure(url, status));
+    } else {
+      report.recordAvailable(url, kind);
+    }
+  },
+
   /** Emits one download-progress event; never lets a UI error break a download. */
   emitProgress(evt) {
     if (!this.progressSink) return;
@@ -1488,6 +1625,7 @@ const exported = {
    * @param {any} data data to write
    */
   async writeFile(dir, filename, data) {
+    if (this.dryRun) return; // dry-run writes nothing to disk
     const textStream = Readable.from(data);
     const fileStream = fs.createWriteStream(path.join(dir, filename));
     await textStream.pipe(fileStream);
@@ -1608,6 +1746,9 @@ const exported = {
    * @returns {string} the path actually created (may carry a " (n)" suffix)
    */
   mkUniqueDir(desiredPath) {
+    // Dry-run writes nothing, so don't create (or uniquify) any directories;
+    // just hand back the path callers use to build download destinations.
+    if (this.dryRun) return desiredPath;
     const parent = path.dirname(desiredPath);
     const base = path.basename(desiredPath);
     fs.mkdirSync(parent, { recursive: true });
@@ -1699,10 +1840,13 @@ const exported = {
     }
 
     // Only now that we know the tab is real do we create its output directory,
-    // so a disabled/redirected tab doesn't leave an empty folder behind.
-    fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`, {
-      recursive: true,
-    });
+    // so a disabled/redirected tab doesn't leave an empty folder behind. (A
+    // dry-run writes nothing, so it skips this.)
+    if (!this.dryRun) {
+      fs.mkdirSync(`${dir}/${this.types[type].p.toUpperCase()}`, {
+        recursive: true,
+      });
+    }
 
     if (type === "assignment") {
       let submissionsURL = `${url.replace(
@@ -1718,7 +1862,7 @@ const exported = {
       }
     }
 
-    await page.pdf({
+    await this.capturePdf(page, {
       path: `${dir}/${this.types[type].p.toUpperCase()}/${this.types[
         type
       ].p.toUpperCase()}.pdf`,

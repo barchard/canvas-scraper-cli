@@ -97,6 +97,16 @@ const flagDef = [
   },
   {
     type: "confirm",
+    name: "dryRun",
+    message:
+      "Do you want a dry run (probe for inaccessible articles/artifacts without downloading)?",
+    default: false,
+    flags: "--dry-run",
+    description:
+      "probe every article/artifact for accessibility and write dry-run-report.csv, without downloading anything",
+  },
+  {
+    type: "confirm",
     name: "report",
     message:
       "Do you want to write a CSV report of every downloaded asset (report.csv)?",
@@ -215,9 +225,10 @@ program.action(async (url, options) => {
     const hasContentFlags =
       options.a || options.m || options.q || options.v || options.s || options.all;
 
-    // Passing --courses is an explicit non-interactive intent to scrape (content
-    // defaults to everything), so don't divert to the action menu for it.
-    if (!hasContentFlags && !options.login && !options.courses) {
+    // Passing --courses or --dry-run is an explicit non-interactive intent to
+    // scrape (content defaults to everything), so don't divert to the action
+    // menu for it.
+    if (!hasContentFlags && !options.login && !options.courses && !options.dryRun) {
       await renderTui(url, { ...options, _menu: true });
       return;
     }
