@@ -1113,6 +1113,17 @@ const exported = {
         return { handled: true, ok: false, reason: "HBSP content not accessible" };
       }
 
+      // The content-launch page titles itself with the readable case name (e.g
+      // "Assembling the Startup Team"); HBS only sends a coded content-disposition
+      // filename ("812122-PDF-ENG.pdf"), so prefer this for a human-readable file.
+      let docTitle = "";
+      try {
+        docTitle = ((await page.title()) || "").trim();
+      } catch (e) {
+        // ignore
+      }
+      if (/harvard business publishing/i.test(docTitle)) docTitle = "";
+
       // The HBS page may be the top frame or an embedded tool iframe.
       for (const frame of page.frames()) {
         let result = null;
@@ -1167,20 +1178,24 @@ const exported = {
         if (result === null) continue; // no PDF form in this frame
         if (!result.ok) return { handled: true, ok: false };
 
-        let filename = null;
-        const m =
-          result.contentDisposition &&
-          result.contentDisposition.match(
-            /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i
-          );
-        if (m) {
-          try {
-            filename = decodeURIComponent(m[1]);
-          } catch (e) {
-            filename = m[1];
+        // Prefer the readable case title; otherwise the server's filename (the
+        // regex tolerates spaces around '=', which HBS emits), then the id.
+        let filename = docTitle || null;
+        if (!filename) {
+          const m =
+            result.contentDisposition &&
+            result.contentDisposition.match(
+              /filename\*?\s*=\s*(?:UTF-8'')?"?([^";]+)"?/i
+            );
+          if (m) {
+            try {
+              filename = decodeURIComponent(m[1].trim());
+            } catch (e) {
+              filename = m[1].trim();
+            }
           }
         }
-        if (!filename) filename = (result.availabilityId || "document") + ".pdf";
+        if (!filename) filename = result.availabilityId || "document";
         if (!/\.pdf$/i.test(filename)) filename += ".pdf";
 
         const buf = Buffer.from(result.base64, "base64");
