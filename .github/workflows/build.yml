@@ -26,7 +26,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -65,7 +65,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -73,14 +73,15 @@ jobs:
           PUPPETEER_SKIP_DOWNLOAD: "true"
         run: npm ci
 
-      # nexe compiles Node from source; cache the result to speed up later runs.
-      - name: Cache nexe build artifacts
+      # pkg downloads a prebuilt Node base binary per target; cache it so later
+      # runs skip the download.
+      - name: Cache pkg base binaries
         uses: actions/cache@v6
         with:
-          path: ~/.nexe
-          key: nexe-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          path: ~/.pkg-cache
+          key: pkg-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            nexe-${{ runner.os }}-node20-
+            pkg-${{ runner.os }}-node24-
 
       - name: Build executable
         run: ${{ matrix.build }}

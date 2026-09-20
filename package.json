@@ -9,10 +9,11 @@
     "tui": "node index.js --tui",
     "start": "./canvas-scraper.exe",
     "test": "node --test",
-    "build-win": "nexe index.js -o dist/canvas-scraper-win.exe --build --verbose",
-    "build-linux": "nexe index.js -o dist/canvas-scraper-linux --build --verbose",
-    "build-mac": "nexe index.js -o dist/canvas-scraper-mac --build --verbose",
-    "build": "npm run build-win && npm run build-linux && npm run build-mac"
+    "bundle": "node build.mjs",
+    "build-win": "npm run bundle && pkg dist/app.mjs --no-bytecode --public --public-packages \"*\" --targets node24-win-x64 --output dist/canvas-scraper-win.exe",
+    "build-mac": "npm run bundle && pkg dist/app.mjs --no-bytecode --public --public-packages \"*\" --targets node24-macos-arm64 --output dist/canvas-scraper-mac",
+    "build-linux": "npm run bundle && pkg dist/app.mjs --no-bytecode --public --public-packages \"*\" --targets node24-linux-x64 --output dist/canvas-scraper-linux",
+    "build": "npm run build-win && npm run build-mac && npm run build-linux"
   },
   "author": "",
   "license": "ISC",
@@ -20,7 +21,8 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "nexe": "4.0.0-rc.7"
+    "@yao-pkg/pkg": "^6.7.0",
+    "esbuild": "^0.24.2"
   },
   "dependencies": {
     "commander": "^11.1.0",
