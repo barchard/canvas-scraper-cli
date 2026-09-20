@@ -25,6 +25,13 @@ const report = {
   // Tracked independently of `enabled` so errors are always available to write
   // to errors.csv, even without --report.
   errors: [],
+  // Rich, structured snapshots captured when a download fails despite the item
+  // being reachable by hand (e.g an HBSP LTI launch). Unlike the one-line
+  // skip/failure reason, each entry records the page state at the point of
+  // failure — landed URL, HTTP status, page title/text, and per-frame form and
+  // POST details — so the scraper can be updated to handle the case. Always on
+  // (not gated by `enabled`) and written to download-diagnostics.jsonl.
+  diagnostics: [],
   current: { courseName: "", courseUrl: "" },
 
   /** Turns recording on. No-op recorders stay cheap when the flag is off. */
@@ -74,23 +81,31 @@ const report = {
    * and (best-effort) reason. Attributed to the current course, like record().
    * @param {string} url source URL of the asset that could not be downloaded
    * @param {string} [reason] short description of why it was skipped/failed
+   * @param {object} [opts]
+   * @param {string} [opts.destDir] the folder the scraper would have saved the
+   *   file into. Recorded so the manual importer can place a hand-obtained copy
+   *   exactly where the scraper would have put it.
    */
-  recordFailure(url, reason) {
+  recordFailure(url, reason, opts = {}) {
     if (!this.enabled) return;
     reason = reason || "";
+    const destDir = opts.destDir || "";
     const key = `${url || ""}\n${this.current.courseUrl}`;
     const existing = this.skippedIndex.get(key);
     if (existing) {
       // Same asset seen again: keep it as one row, but upgrade a generic reason
-      // (e.g "download failed") if a later attempt produced a specific one.
+      // (e.g "download failed") if a later attempt produced a specific one, and
+      // fill in a destination the first attempt didn't have.
       if (isGenericReason(existing.reason) && !isGenericReason(reason)) {
         existing.reason = reason;
       }
+      if (!existing.destDir && destDir) existing.destDir = destDir;
       return;
     }
     const row = {
       url: url || "",
       reason,
+      destDir,
       courseName: this.current.courseName,
       courseUrl: this.current.courseUrl,
     };
@@ -141,6 +156,23 @@ const report = {
       stack: stack || "",
       courseName: this.current.courseName,
       courseUrl: this.current.courseUrl,
+    });
+  },
+
+  /**
+   * Records a rich diagnostic snapshot for a download that failed even though
+   * the item may be completable by hand. Always on (like recordError): these
+   * exist to make an unreproducible-looking failure fixable. `entry` is an
+   * arbitrary structured object describing what the scraper saw at the point of
+   * failure; it's tagged with a timestamp and the current course.
+   * @param {object} entry structured diagnostic fields (kind, url, outcome, …)
+   */
+  recordDiagnostic(entry = {}) {
+    this.diagnostics.push({
+      time: new Date().toISOString(),
+      courseName: this.current.courseName,
+      courseUrl: this.current.courseUrl,
+      ...entry,
     });
   },
 
@@ -214,11 +246,13 @@ const report = {
    */
   writeSkipped(filePath) {
     if (!this.enabled || !this.skipped.length) return 0;
-    const header = ["url", "reason", "course_name", "course_url"];
+    const header = ["url", "reason", "dest_dir", "course_name", "course_url"];
     const lines = [header.map(csvField).join(",")];
     for (const r of this.skipped) {
       lines.push(
-        [r.url, r.reason, r.courseName, r.courseUrl].map(csvField).join(",")
+        [r.url, r.reason, r.destDir || "", r.courseName, r.courseUrl]
+          .map(csvField)
+          .join(",")
       );
     }
     fs.writeFileSync(filePath, lines.join("\r\n") + "\r\n");
@@ -263,6 +297,22 @@ const report = {
     }
     fs.writeFileSync(filePath, lines.join("\r\n") + "\r\n");
     return this.errors.length;
+  },
+
+  /**
+   * Writes the captured diagnostic snapshots to `filePath` as JSON Lines (one
+   * JSON object per line). No-op (returns 0) when nothing was captured, so the
+   * caller can skip an empty file. Not gated by `enabled` — diagnostics are
+   * always tracked. JSONL (not CSV) because entries are nested and hold long
+   * free-text (page titles, body snippets, per-frame details).
+   * @param {string} filePath where to write the JSONL
+   * @returns {number} number of diagnostic entries written
+   */
+  writeDiagnostics(filePath) {
+    if (!this.diagnostics.length) return 0;
+    const lines = this.diagnostics.map((d) => JSON.stringify(d));
+    fs.writeFileSync(filePath, lines.join("\n") + "\n");
+    return this.diagnostics.length;
   },
 
   /**
