@@ -1,0 +1,122 @@
+name: Build executables
+
+# Build standalone executables for Windows and macOS whenever changes land on main.
+# Tests must pass before any executable is built.
+on:
+  push:
+    branches: [main]
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+# Avoid overlapping builds on rapid merges; cancel the older run.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        # Puppeteer's Chromium isn't needed to run tests; skip the heavy download.
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the macOS build if the Windows build fails, or vice versa.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            build: npm run build-win
+            artifact: dist/canvas-scraper-win.exe
+          - os: macos-latest
+            name: macos
+            build: npm run build-mac
+            artifact: dist/canvas-scraper-mac
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        run: npm ci
+
+      # nexe compiles Node from source; cache the result to speed up later runs.
+      - name: Cache nexe build artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.nexe
+          key: nexe-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            nexe-${{ runner.os }}-node20-
+
+      - name: Build executable
+        run: ${{ matrix.build }}
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: canvas-scraper-${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Creating/updating a release and moving a tag needs write access to the repo.
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish rolling "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          # A single rolling release that always holds the newest main build,
+          # so users have a stable download URL (…/releases/latest).
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          body: |
+            Standalone Canvas Scraper executables built from the latest commit on `main`.
+
+            - Commit: ${{ github.sha }}
+            - `canvas-scraper-win.exe` — Windows (x64)
+            - `canvas-scraper-mac` — macOS (Apple Silicon)
+
+            These builds require Google Chrome to be installed. The app detects
+            Chrome on launch and prints install instructions (Scoop / Homebrew)
+            if it's missing.
+          files: artifacts/**/canvas-scraper-*

@@ -6,6 +6,7 @@ import helpers from "./scrapers/helpers.js";
 import { runScrape } from "./core/scrape.js";
 import { runLogin } from "./core/login.js";
 import { renderTui } from "./tui/app.js";
+import { ensureChrome } from "./core/chrome.js";
 
 const argDef = [
   {
@@ -160,6 +161,8 @@ program
   .option("--login-mode <mode>", "cookie capture strategy (fresh)", "fresh")
   .action(async (url, opts) => {
     try {
+      // Every flow drives a real Chrome; fail early with install help if absent.
+      ensureChrome();
       if (!url) {
         const { loginUrl } = await inquirer.prompt([
           {
@@ -183,6 +186,9 @@ program
 
 program.action(async (url, options) => {
   try {
+    // Every flow drives a real Chrome; fail early with install help if absent.
+    ensureChrome();
+
     // No URL -> the unified Ink wizard: it prompts for the URL, logs in, asks
     // what to scrape, lets the user pick a course (or all), then runs the
     // scrape — all in one terminal UI.
