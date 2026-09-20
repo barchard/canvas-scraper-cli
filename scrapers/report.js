@@ -13,6 +13,9 @@ const report = {
   enabled: false,
   rows: [],
   skipped: [],
+  // Index into `skipped` keyed by url+course, so the same asset attempted more
+  // than once in a run (e.g referenced from several modules) yields one row.
+  skippedIndex: new Map(),
   current: { courseName: "", courseUrl: "" },
 
   /** Turns recording on. No-op recorders stay cheap when the flag is off. */
@@ -65,12 +68,25 @@ const report = {
    */
   recordFailure(url, reason) {
     if (!this.enabled) return;
-    this.skipped.push({
+    reason = reason || "";
+    const key = `${url || ""}\n${this.current.courseUrl}`;
+    const existing = this.skippedIndex.get(key);
+    if (existing) {
+      // Same asset seen again: keep it as one row, but upgrade a generic reason
+      // (e.g "download failed") if a later attempt produced a specific one.
+      if (isGenericReason(existing.reason) && !isGenericReason(reason)) {
+        existing.reason = reason;
+      }
+      return;
+    }
+    const row = {
       url: url || "",
-      reason: reason || "",
+      reason,
       courseName: this.current.courseName,
       courseUrl: this.current.courseUrl,
-    });
+    };
+    this.skippedIndex.set(key, row);
+    this.skipped.push(row);
   },
 
   /**
@@ -154,6 +170,14 @@ const report = {
     return this.skipped.length;
   },
 };
+
+/**
+ * Whether a skip reason is a vague catch-all (so a more specific reason seen for
+ * the same asset later should replace it).
+ */
+function isGenericReason(reason) {
+  return /^(\s*|download failed|download error|HTTP \d+)\s*$/i.test(reason || "");
+}
 
 /** Formats a byte count as B/KB/MB/GB/TB with two decimals above bytes. */
 function humanSize(bytes) {

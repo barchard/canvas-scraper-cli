@@ -103,7 +103,7 @@ const exported = {
     // A non-2xx response never carries the file; bail before writing anything
     // (e.g. an expired session yields a 401/403, or a broken link a 404).
     if (!response.ok) {
-      report.recordFailure(url, `HTTP ${response.status}`);
+      report.recordFailure(url, this.describeHttpFailure(url, response.status));
       return false;
     }
 
@@ -365,6 +365,69 @@ const exported = {
     return this.getVideoHosts().some(
       (h) => hostname === h || hostname.endsWith(`.${h}`)
     );
+  },
+
+  /**
+   * Explains, for the skipped report, why a non-2xx HTTP response means the file
+   * couldn't be fetched. A Canvas file 403 almost always means the file is locked
+   * or restricted by the instructor (the session is still valid — other files in
+   * the same run download fine), so we say so rather than implying an auth error.
+   * @param {string} url the URL that returned the error
+   * @param {number} status the HTTP status code
+   * @returns {string}
+   */
+  describeHttpFailure(url, status) {
+    const isCanvasFile = /\/files\/\d+\/download/.test(url || "");
+    if (status === 403) {
+      return isCanvasFile
+        ? "locked/restricted file — instructor-locked or unavailable (HTTP 403)"
+        : "access denied (HTTP 403)";
+    }
+    if (status === 401) {
+      return "not authorized — session invalid for this item (HTTP 401)";
+    }
+    if (status === 404) return "not found — link may be broken (HTTP 404)";
+    return `HTTP ${status}`;
+  },
+
+  /**
+   * Explains, for the skipped report, why a link couldn't be downloaded, based on
+   * its host. These are provider-side access restrictions rather than scraper or
+   * cookie bugs: the content is licensed, paywalled, locked, or only granted
+   * inside a live Canvas launch — none of which a session cookie alone unlocks.
+   * For Canvas LTI launches the real target lives in the `url` query param, so we
+   * inspect that too.
+   * @param {string} url the undownloadable URL
+   * @param {object} [opts]
+   * @param {boolean} [opts.video] whether the URL was treated as a video host
+   * @param {boolean} [opts.lti] whether it was reached via a Canvas LTI launch
+   * @returns {string}
+   */
+  describeUndownloadable(url, opts = {}) {
+    let hay = String(url || "").toLowerCase();
+    try {
+      const u = new URL(url);
+      hay = `${u.hostname} ${u.searchParams.get("url") || ""}`.toLowerCase();
+    } catch (e) {
+      // not a parseable URL; fall back to the raw string
+    }
+    const via = opts.lti ? " (Canvas LTI launch)" : "";
+    if (/(^|\.|\/)panopto\.com/.test(hay) || /panopto/.test(hay)) {
+      return `Panopto video not downloadable${via} — access is granted only inside the Canvas viewer, not to a standalone request`;
+    }
+    if (/primo|exlibrisgroup|proquest|ebookcentral|ebscohost|jstor|skillsoft|books24x7|perlego|vlebooks|askewsholts/.test(hay)) {
+      return "library-licensed resource — a catalog/reader link, not a downloadable file";
+    }
+    if (/nytimes|wsj\.com|washingtonpost|bloomberg|ft\.com|economist|forbes|hbr\.org|reuters/.test(hay)) {
+      return "paywalled article — the page is login/subscription-gated";
+    }
+    if (opts.video) {
+      return "video not downloadable — provider blocked the request or it is access-restricted";
+    }
+    if (opts.lti) {
+      return "external tool launch not downloadable — no file behind this LTI tool";
+    }
+    return "not a downloadable file — the page was blocked or requires login";
   },
 
   /**
@@ -679,12 +742,21 @@ const exported = {
       } catch (e) {
         // ignore
       }
-      const probe = `${name}\n${bodyText}`.toLowerCase();
-      const blocked =
-        bodyText.trim().length < 200 ||
-        /are you a robot|just a moment|access (?:to this page has been )?denied|enable javascript|please enable (?:js|cookies)|verify you are (?:a )?human|captcha|unusual traffic|request (?:was )?blocked/.test(
-          probe
-        );
+      const len = bodyText.trim().length;
+      // Strip the passive "protected by reCAPTCHA/hCaptcha" notice that many
+      // legitimate sites embed on newsletter and comment forms (e.g The
+      // Atlantic's footer). It is not a bot challenge, and letting the bare
+      // "captcha" keyword match it discards a perfectly good archive.
+      const probe = `${name}\n${bodyText}`
+        .toLowerCase()
+        .replace(/protected by (?:google )?(?:re)?captcha|protected by hcaptcha/g, "");
+      // A real bot wall serves a near-empty page or a short interstitial, so only
+      // trust an interstitial keyword on a short page. A full-length article that
+      // mentions one of these phrases in passing (e.g a course reading *about*
+      // CAPTCHAs or bot detection) is not blocked.
+      const interstitial =
+        /are you a robot|just a moment|access (?:to this page has been )?denied|enable javascript|please enable (?:js|cookies)|verify you are (?:a )?human|captcha|unusual traffic|request (?:was )?blocked/;
+      const blocked = len < 200 || (len < 1000 && interstitial.test(probe));
       if (blocked) {
         return false;
       }
@@ -1271,12 +1343,13 @@ const exported = {
       }
 
       try {
-        const success = this.isVideoHost(hostname)
+        const isVideo = this.isVideoHost(hostname);
+        const success = isVideo
           ? await this.downloadVideo(url, dir, cookies)
           : await this.downloadExternalResource(page.browser(), url, dir, i);
         if (!success) {
           problematic.push(url);
-          report.recordFailure(url, "download failed");
+          report.recordFailure(url, this.describeUndownloadable(url, { video: isVideo }));
         }
       } catch (e) {
         problematic.push(url);
@@ -1291,7 +1364,9 @@ const exported = {
     // and saved manually (the Canvas URL performs the launch while signed in).
     for (const url of lti) {
       let ok = false;
-      let reason = "external tool launch not downloadable";
+      // Default to a host-aware explanation (e.g Panopto launches); downloadLtiPdf
+      // overrides it with an HBS-specific reason when it recognizes the launch.
+      let reason = this.describeUndownloadable(url, { lti: true });
       try {
         const r = await this.downloadLtiPdf(page.browser(), cookies, url, dir);
         ok = !!(r && r.handled && r.ok);
