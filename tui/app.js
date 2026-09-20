@@ -245,30 +245,63 @@ function SelectPrompt({ message, items, onSelect }) {
   );
 }
 
-/** Multi-select checklist. Up/Down to move, Space to toggle, Enter to submit. */
-function MultiSelectPrompt({ message, items, onSubmit }) {
+/**
+ * Multi-select checklist. Up/Down to move, Space to toggle, Enter to submit.
+ *
+ * When `selectAllLabel` is set, an extra row is shown at the top: toggling it
+ * checks or unchecks every item at once, and its own checkbox reflects whether
+ * all items are currently checked. `validate(values)` may return a string to
+ * block submission with an error message.
+ */
+function MultiSelectPrompt({ message, items, onSubmit, selectAllLabel, validate }) {
   const [idx, setIdx] = React.useState(0);
   const [checked, setChecked] = React.useState(
     () => new Set(items.filter((i) => i.checked).map((i) => i.value))
   );
+  const [err, setErr] = React.useState(null);
+
+  // Rows the cursor can land on: the optional "select all" row, then the items.
+  const rows = selectAllLabel
+    ? [{ selectAll: true, label: selectAllLabel }, ...items]
+    : items;
+  const allChecked = items.length > 0 && items.every((it) => checked.has(it.value));
 
   useInput((input, key) => {
-    if (key.upArrow) setIdx((i) => (i - 1 + items.length) % items.length);
-    else if (key.downArrow) setIdx((i) => (i + 1) % items.length);
+    if (key.upArrow) setIdx((i) => (i - 1 + rows.length) % rows.length);
+    else if (key.downArrow) setIdx((i) => (i + 1) % rows.length);
     else if (input === " ") {
+      setErr(null);
+      const row = rows[idx];
       setChecked((prev) => {
         const next = new Set(prev);
-        const v = items[idx].value;
-        if (next.has(v)) next.delete(v);
-        else next.add(v);
+        if (row.selectAll) {
+          // Toggle every item: if all are on, clear them; otherwise select all.
+          if (items.every((it) => next.has(it.value))) {
+            for (const it of items) next.delete(it.value);
+          } else {
+            for (const it of items) next.add(it.value);
+          }
+        } else if (next.has(row.value)) {
+          next.delete(row.value);
+        } else {
+          next.add(row.value);
+        }
         return next;
       });
     } else if (key.return) {
-      onSubmit(items.filter((it) => checked.has(it.value)).map((it) => it.value));
+      const values = items.filter((it) => checked.has(it.value)).map((it) => it.value);
+      if (validate) {
+        const r = validate(values);
+        if (r !== true) {
+          setErr(typeof r === "string" ? r : "Invalid selection.");
+          return;
+        }
+      }
+      onSubmit(values);
     }
   });
 
-  const { start, visible } = windowed(items, idx);
+  const { start, visible } = windowed(rows, idx);
   return h(
     Box,
     { flexDirection: "column" },
@@ -283,16 +316,23 @@ function MultiSelectPrompt({ message, items, onSubmit }) {
     ...visible.map((it, i) => {
       const absolute = start + i;
       const active = absolute === idx;
-      const box = checked.has(it.value) ? "◉" : "◯";
+      const box = it.selectAll
+        ? allChecked
+          ? "◉"
+          : "◯"
+        : checked.has(it.value)
+        ? "◉"
+        : "◯";
       return h(
         Text,
-        { key: absolute, color: active ? "cyan" : undefined },
+        { key: absolute, color: active ? "cyan" : undefined, bold: it.selectAll || undefined },
         `${active ? "❯ " : "  "}${box} ${it.label}`
       );
     }),
-    start + visible.length < items.length
+    start + visible.length < rows.length
       ? h(Text, { dimColor: true }, "  ▼ more")
-      : null
+      : null,
+    err ? h(Text, { color: "red" }, err) : null
   );
 }
 
@@ -323,6 +363,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
           a: false, m: false, q: false, v: false, s: false,
           t: false, report: false, wiki: false, octarine: false,
           all: false, tui: false,
+          courseIds: null,
           _menu: true,
           _domain: "",
           _courseId: null,
@@ -582,8 +623,8 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     const cfg = configRef.current;
     if (value === "scrape") {
       // Browse the courses first (unless the URL already names one), then ask
-      // what to download.
-      setStep(cfg._courseId ? "types" : "scope");
+      // what to download. The course list lets you pick any subset (or all).
+      setStep(cfg._courseId ? "types" : "fetchCourses");
     } else if (value === "login") {
       loginStarted.current = false;
       setStep("cookiesPathLogin");
@@ -602,12 +643,14 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     setStep("login");
   };
 
-  const onScope = (value) => {
-    setStep(value === "one" ? "fetchCourses" : "types");
-  };
-
-  const onCourse = (id) => {
-    configRef.current.url = `${configRef.current._domain}/courses/${id}`;
+  const onCourses = (ids) => {
+    const cfg = configRef.current;
+    // Scrape from the bare domain; runScrape lists the courses and (when
+    // courseIds is set) narrows to the chosen subset. Selecting every course is
+    // the same as "all", so drop the filter in that case.
+    cfg.url = cfg._domain;
+    cfg._courseId = null;
+    cfg.courseIds = ids.length === courses.length ? null : ids;
     setStep("types");
   };
 
@@ -697,22 +740,22 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       ],
       onSubmit: onTypes,
     });
-  } else if (step === "scope") {
-    view = h(SelectPrompt, {
-      message: "Scrape all your courses, or pick one?",
-      items: [
-        { label: "Pick a specific course", value: "one" },
-        { label: "All my courses", value: "all" },
-      ],
-      onSelect: onScope,
-    });
   } else if (step === "fetchCourses") {
     view = spin("Fetching your courses…");
   } else if (step === "course") {
-    view = h(SelectPrompt, {
-      message: `Which course? (${courses.length} found)`,
-      items: courses.map((c) => ({ label: `${c.name} (${c.id})`, value: c.id })),
-      onSelect: onCourse,
+    view = h(MultiSelectPrompt, {
+      message: `Which courses? (${courses.length} found)`,
+      selectAllLabel: "All courses",
+      // Default to everything checked; use the "All courses" row or Space to
+      // de-select the ones you don't want.
+      items: courses.map((c) => ({
+        label: `${c.name} (${c.id})`,
+        value: c.id,
+        checked: true,
+      })),
+      validate: (values) =>
+        values.length > 0 || "Select at least one course (Space to toggle).",
+      onSubmit: onCourses,
     });
   } else if (step === "output") {
     view = h(TextPrompt, {

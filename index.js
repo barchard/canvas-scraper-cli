@@ -140,6 +140,10 @@ flagDef.forEach((flag) =>
 );
 
 program.option("--all", "scrape all content types (-a -m -q -v -s)");
+program.option(
+  "--courses <ids>",
+  "comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses"
+);
 program.option("--tui", "run with the interactive terminal UI (Ink)");
 program.option(
   "--login",
@@ -189,6 +193,14 @@ program.action(async (url, options) => {
     // Every flow drives a real Chrome; fail early with install help if absent.
     ensureChrome();
 
+    // Normalize --courses into the courseIds array runScrape expects.
+    if (typeof options.courses === "string") {
+      options.courseIds = options.courses
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+
     // No URL -> the unified Ink wizard: it prompts for the URL, then shows an
     // action menu (Log in / About / Scrape …). Scraping browses the courses
     // first, then asks what to download — all in one terminal UI.
@@ -203,7 +215,9 @@ program.action(async (url, options) => {
     const hasContentFlags =
       options.a || options.m || options.q || options.v || options.s || options.all;
 
-    if (!hasContentFlags && !options.login) {
+    // Passing --courses is an explicit non-interactive intent to scrape (content
+    // defaults to everything), so don't divert to the action menu for it.
+    if (!hasContentFlags && !options.login && !options.courses) {
       await renderTui(url, { ...options, _menu: true });
       return;
     }

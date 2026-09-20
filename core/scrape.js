@@ -348,7 +348,27 @@ export async function runScrape(url, options, hooks = {}) {
         `No course id in URL — scraping all your courses on ${domain}...`,
         0
       );
-      const courses = await helpers.listCourses(domain, cookies, browser);
+      let courses = await helpers.listCourses(domain, cookies, browser);
+
+      // Narrow to a chosen subset when the caller passed specific course ids
+      // (the TUI course picker). An empty/absent list means "all courses".
+      if (Array.isArray(options.courseIds) && options.courseIds.length) {
+        const wanted = new Set(options.courseIds.map(String));
+        const subset = courses.filter((c) => wanted.has(String(c.id)));
+        const missing = [...wanted].filter(
+          (id) => !courses.some((c) => String(c.id) === id)
+        );
+        if (missing.length) {
+          helpers.print(
+            "WARNING",
+            "COURSES",
+            `Selected course id(s) not found in your enrollments: ${missing.join(", ")}`,
+            0
+          );
+        }
+        courses = subset;
+      }
+
       if (!courses.length) {
         helpers.print(
           "WARNING",

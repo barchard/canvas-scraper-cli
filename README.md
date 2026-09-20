@@ -121,6 +121,7 @@ Options:
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
   --all                    scrape all content types (-a -m -q -v -s)
+  --courses <ids>          comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses
   --tui                    run with the interactive terminal UI (Ink)
   --login                  open a browser to log in and capture cookies before scraping
   --login-mode <mode>      cookie capture strategy for --login (default: "fresh")
@@ -131,6 +132,8 @@ Commands:
 ```
 
 Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
+
+Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 
 ### Terminal UI (`--tui`)
 
