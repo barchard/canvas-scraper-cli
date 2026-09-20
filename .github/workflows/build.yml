@@ -55,6 +55,10 @@ jobs:
             name: macos
             build: npm run build-mac
             artifact: dist/canvas-scraper-mac
+          - os: ubuntu-latest
+            name: linux
+            build: npm run build-linux
+            artifact: dist/canvas-scraper-linux
     steps:
       - uses: actions/checkout@v4
 
@@ -115,6 +119,7 @@ jobs:
             - Commit: ${{ github.sha }}
             - `canvas-scraper-win.exe` — Windows (x64)
             - `canvas-scraper-mac` — macOS (Apple Silicon)
+            - `canvas-scraper-linux` — Linux (x64)
 
             These builds require Google Chrome to be installed. The app detects
             Chrome on launch and prints install instructions (Scoop / Homebrew)
