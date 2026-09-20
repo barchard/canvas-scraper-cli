@@ -293,6 +293,37 @@ function writeErrorsReport(dir) {
 }
 
 /**
+ * Writes download-diagnostics.jsonl listing rich snapshots of downloads that
+ * failed despite the item being potentially completable by hand (e.g HBSP LTI
+ * launches). No-op when nothing was captured (or no output dir). Best-effort:
+ * its own failure is swallowed so it can run inside a finally.
+ */
+function writeDiagnosticsReport(dir) {
+  if (!dir || !report.diagnostics.length) return;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const diagPath = `${dir}/download-diagnostics.jsonl`;
+    const count = report.writeDiagnostics(diagPath);
+    if (count > 0) {
+      helpers.print(
+        "NOTE",
+        "DIAGNOSTICS",
+        `Wrote ${count} download diagnostic(s) to ${diagPath}`,
+        0
+      );
+    }
+  } catch (e) {
+    helpers.print(
+      "WARNING",
+      "DIAGNOSTICS",
+      "Could not write download-diagnostics.jsonl",
+      0,
+      e.message || e
+    );
+  }
+}
+
+/**
  * Writes the dry-run accessibility report (dry-run-report.csv) and prints a
  * summary of how many articles/artifacts were accessible vs inaccessible.
  * Errors are logged, not thrown.
@@ -353,8 +384,10 @@ export async function runScrape(url, options, hooks = {}) {
   const prevDryRun = helpers.dryRun;
   helpers.setDryRun(!!options.dryRun);
 
-  // Reset per-run error tracking so errors.csv reflects only this run.
+  // Reset per-run error and diagnostic tracking so the reports reflect only
+  // this run.
   report.errors = [];
+  report.diagnostics = [];
 
   let browser;
   // Hoisted so the finally can always write errors.csv, even if the run throws.
@@ -550,6 +583,9 @@ export async function runScrape(url, options, hooks = {}) {
     // Always flush tracked errors to errors.csv (best-effort). This runs even
     // when the scrape threw, so a failed run still leaves a record to resolve.
     writeErrorsReport(dir);
+    // Likewise flush any rich failure diagnostics (e.g HBSP LTI launches that
+    // couldn't be downloaded) so the scraper can be updated to handle them.
+    writeDiagnosticsReport(dir);
     helpers.setPrinter(prevPrinter);
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);

@@ -187,6 +187,7 @@ Alongside it, a second file — `report-skipped.csv` — lists every asset that 
 | --- | --- |
 | `url` | the asset's source URL |
 | `reason` | why it was skipped or failed |
+| `dest_dir` | the folder the scraper would have saved the file into (used by the [manual importer](#manual-import-import) to place a hand-obtained copy) |
 | `course_name` | the course the asset belonged to |
 | `course_url` | that course's Canvas URL |
 
@@ -210,6 +211,58 @@ Every run — no flag required — records the errors it hits (a page that would
 Together these give a developer (or an LLM) enough to locate and fix a failure: `error` + `item` say what the scraper was doing, `error_type` + `detail` say what went wrong, and `stack` points at the exact code path. The only thing not captured is the failing item's own URL (the `course_url` and the human-readable `item` name are recorded instead).
 
 Transient browser hiccups (`Target.createTarget timed out`, `Requesting main frame too early!`) are automatically retried before they're logged as errors, and the headless browser is launched with a higher `protocolTimeout` (5 min) so opening a tab or rendering a large page under load no longer aborts the scrape.
+
+### Download diagnostics (`download-diagnostics.jsonl`)
+
+`report-skipped.csv` says *that* a download failed and gives a one-line reason, but not enough to fix the scraper when an item that fails automatically still opens fine by hand (Harvard Business Publishing readings are the common case: the Canvas `external_tools/retrieve?url=…hbsp.harvard.edu…` link performs a signed LTI launch that works in a real browser but can fail the headless POST). For those, every run — no flag required — also writes `download-diagnostics.jsonl` in the output directory: one JSON object per line capturing the page state at the point of failure, so the failing case can be reproduced and the scraper updated. It's written only when at least one such diagnostic was captured. Each entry includes:
+
+| Field | Description |
+| --- | --- |
+| `time` | when the failure was captured (ISO timestamp) |
+| `kind` | the download type (e.g. `lti-pdf` for an HBSP launch) |
+| `url` | the Canvas link that was attempted (the `retrieve?url=…` launch URL) |
+| `target` | the LTI `url` target the launch pointed at (e.g. the HBSP resource) |
+| `outcome` | why it ended: `pdf-post-failed`, `no-pdf-form`, `hbsp-expired`, `hbsp-not-accessible`, or `exception` |
+| `httpStatus` | the HTTP status the initial launch page returned |
+| `landedUrl` | where the launch actually navigated to |
+| `launchFormSubmitted` | whether the signed launch form was found and submitted |
+| `docTitle` | the landed page's title (often the readable case name) |
+| `bodyTextSnippet` | the first ~1 KB of the landed page's text (surfaces status/error pages) |
+| `frames` | per-frame form/POST details — `formAction`, `status`, `contentType`, `contentDisposition` — for every frame that held a download form (the PDF bytes are **not** included) |
+| `error` | the exception message, when the launch threw |
+| `course_name` / `course_url` | the course being scraped |
+
+Between `outcome`, `landedUrl`/`httpStatus`, `bodyTextSnippet`, and the per-frame POST `status`/`contentType`, an entry says exactly where the launch diverged from a successful download — a `403` on the `pdf-downloads` POST, an HTML error page returned where a PDF was expected, a launch that never navigated, or a "not accessible" status page — which is what the scraper needs to be taught the case.
+
+### Manual import (`import`)
+
+When an item can't be pulled automatically but opens fine by hand (again, HBSP readings are the common case), the `import` subcommand files a copy you downloaded yourself into the exact place the scraper would have put it — so the output tree stays complete. It's a pure filesystem operation (no browser, no login):
+
+```bash
+# 1. Scrape as usual — gaps land in report-skipped.csv with a dest_dir.
+canvas-scraper https://canvas.mit.edu/courses/38458 -a -m --report
+
+# 2. Open the failed links by hand and save the files into courses/import/,
+#    then map each file to its gap and import:
+canvas-scraper import courses --interactive
+```
+
+How it works:
+
+- The **worklist** is the set of gaps the scraper recorded — it reads `report-skipped.csv` (and `download-diagnostics.jsonl`) from the output directory. Each gap is keyed by its original Canvas URL and carries the `dest_dir` the file belongs in.
+- You drop the hand-obtained files into `<output>/import/` and tell the importer which gap each one fills, either with `--interactive` (it prompts you per file) or by writing a **manifest** — `<output>/import/manifest.csv` with `file,url` columns (JSON is also accepted). The `url` is the gap's Canvas link from `report-skipped.csv`; matching also succeeds on the HBSP resource id (e.g. `H03PQF-PDF-ENG`) if the URL was lightly edited.
+- Each file is copied to its `dest_dir` (falling back to `<output>/<course>/IMPORTED/` for older rows with no `dest_dir`), a `<file>.imported.json` sidecar records where it came from, and the import is logged to `<output>/import/imported.log.jsonl`. If the scrape produced a `report.csv`, imported files are appended to it as first-class assets.
+- Imports are **idempotent** — re-running skips anything already imported — and `--dry-run` shows what would happen without copying.
+- If the output was reorganized with `--wiki` or `--octarine`, the importer notices, places the file under `raw/` (or `.attachments/`) beside the scraped material, and regenerates `index.md` / the Octarine notes so the import shows up in the catalog.
+
+| Flag | Description |
+| --- | --- |
+| `-o, --output <dir>` | output directory to import into (also the first positional arg; default `courses`) |
+| `--from <path>` | an extra worklist source (a `.csv` or `.jsonl` of gaps) in addition to the output dir's reports |
+| `--manifest <path>` | manifest file (default `<output>/import/manifest.csv`) |
+| `--dir <path>` | folder holding the dropped files (default `<output>/import`) |
+| `--interactive` | prompt to match each unmapped dropped file to a gap |
+| `--dry-run` | show what would be imported without copying anything |
 
 ### LLM Wiki layout (`--wiki`)
 

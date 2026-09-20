@@ -75,11 +75,31 @@ function build(dir, rows = []) {
 
   // Sweep every non-reserved top-level entry into raw/. On a fresh scrape these
   // are the course folders (or, in single-course mode, the category folders and
-  // HOMEPAGE.pdf directly).
+  // HOMEPAGE.pdf directly). The sweep only happens on build; reindex() rescans
+  // an already-organized raw/ without moving anything (so it's safe to run
+  // after the fact, when top-level artifacts the sweep doesn't reserve — e.g.
+  // errors.csv, download-diagnostics.jsonl, import/ — are present).
   for (const name of fs.readdirSync(dir)) {
     if (RESERVED.has(name)) continue;
     fs.renameSync(path.join(dir, name), path.join(rawDir, name));
   }
+
+  return reindex(dir, rows);
+}
+
+/**
+ * Regenerates index.md, log.md, CLAUDE.md, and the wiki/ scaffold from whatever
+ * is currently under raw/ — without the initial sweep. Use this to reconcile the
+ * catalog after files are added to raw/ out of band (e.g. the manual importer),
+ * where re-running build() would wrongly sweep unrelated top-level artifacts in.
+ * @param {string} dir the wiki workspace directory
+ * @param {Array<object>} [rows] report rows for source links (matched by file)
+ * @param {string} [logMessage] a custom log.md line; defaults to the ingest line
+ * @returns {{sources: number, bytes: number}}
+ */
+function reindex(dir, rows = [], logMessage = null) {
+  const rawDir = path.join(dir, "raw");
+  if (!fs.existsSync(rawDir)) return { sources: 0, bytes: 0 };
 
   // Map basename -> source URL for best-effort "source" links in the index.
   const urlByFile = new Map();
@@ -95,6 +115,9 @@ function build(dir, rows = []) {
   // Group into course -> category -> [entries].
   const courses = new Map();
   for (const full of files) {
+    // Skip the manual importer's provenance sidecars — they're metadata about a
+    // source, not a source themselves.
+    if (path.basename(full).endsWith(".imported.json")) continue;
     const rel = path.relative(rawDir, full);
     const segments = rel.split(path.sep);
     const { course, category } = classify(segments);
@@ -126,7 +149,8 @@ function build(dir, rows = []) {
   }
 
   writeIndex(dir, courses, files.length, totalBytes);
-  writeLog(dir, files.length, totalBytes);
+  if (logMessage) writeLogLine(dir, logMessage);
+  else writeLog(dir, files.length, totalBytes);
   writeSchema(dir);
   scaffoldWiki(dir);
 
@@ -218,6 +242,17 @@ function writeLog(dir, count, bytes) {
   }
 }
 
+/** Appends an arbitrary line to log.md (creating it with a header if needed). */
+function writeLogLine(dir, text) {
+  const logPath = path.join(dir, "log.md");
+  const line = `- ${new Date().toISOString()} — ${text}\n`;
+  if (fs.existsSync(logPath)) {
+    fs.appendFileSync(logPath, line);
+  } else {
+    fs.writeFileSync(logPath, `# Log\n\nAppend-only record of ingests.\n\n${line}`);
+  }
+}
+
 /** Writes CLAUDE.md — the schema doc telling an agent how to use this vault. */
 function writeSchema(dir) {
   const schema = `# LLM Wiki — Schema
@@ -298,4 +333,4 @@ function listFilesRecursive(dir) {
   return out;
 }
 
-export default { build };
+export default { build, reindex };

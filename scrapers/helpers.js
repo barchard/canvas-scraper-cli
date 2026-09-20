@@ -22,6 +22,15 @@ const BROWSER_UA =
 // so the redirect guard in scrapeSections queries the API at most once/course.
 const courseDefaultViewCache = new Map();
 
+/** A puppeteer frame's URL, or "" if it can't be read (used for diagnostics). */
+function safeFrameUrl(frame) {
+  try {
+    return frame.url() || "";
+  } catch (e) {
+    return "";
+  }
+}
+
 const exported = {
   /**
    * Creates a new page with the given cookies and navigates to the given URL.
@@ -1262,9 +1271,39 @@ const exported = {
       return { handled: false };
     }
 
+    // Accumulate a snapshot of what the launch actually did, so a failure the
+    // user can complete by hand (these HBSP links open fine in a browser) still
+    // leaves enough behind to update the scraper: the landed URL, HTTP status,
+    // page title/text, and — per frame — whether the download form was present
+    // and what its POST returned. Recorded to download-diagnostics.jsonl on any
+    // unsuccessful outcome via fail().
+    const diag = {
+      kind: "lti-pdf",
+      url: retrieveUrl,
+      target: targetParam || "",
+      destDir: dir || "",
+      httpStatus: null,
+      landedUrl: "",
+      launchFormSubmitted: null,
+      docTitle: "",
+      bodyTextSnippet: "",
+      frames: [],
+    };
+    const fail = (outcome, reason) => {
+      diag.outcome = outcome;
+      if (reason) diag.reason = reason;
+      try {
+        report.recordDiagnostic(diag);
+      } catch (e) {
+        // never let diagnostics tracking interfere with the download flow
+      }
+      return { handled: true, ok: false, ...(reason ? { reason } : {}) };
+    };
+
     let page;
     try {
       page = await this.newPage(browser, cookies, retrieveUrl);
+      diag.httpStatus = page.status;
       await page.setUserAgent(BROWSER_UA).catch(() => {});
       // The launch auto-submits a signed form; give it a moment to settle.
       await page
@@ -1287,10 +1326,16 @@ const exported = {
           return true;
         })
         .catch(() => false);
+      diag.launchFormSubmitted = launched;
       if (launched) {
         await page
           .waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 })
           .catch(() => {});
+      }
+      try {
+        diag.landedUrl = page.url();
+      } catch (e) {
+        // ignore
       }
 
       // HBS shows a plain status page (no download) when the coursepack link's
@@ -1304,11 +1349,12 @@ const exported = {
       } catch (e) {
         // ignore
       }
+      diag.bodyTextSnippet = landedText.slice(0, 1000);
       if (/content access .*has expired/i.test(landedText)) {
-        return { handled: true, ok: false, reason: "HBSP content access expired" };
+        return fail("hbsp-expired", "HBSP content access expired");
       }
       if (/(not (?:been )?(?:granted|entitled|authorized)|no access|please (?:sign in|log in))/i.test(landedText)) {
-        return { handled: true, ok: false, reason: "HBSP content not accessible" };
+        return fail("hbsp-not-accessible", "HBSP content not accessible");
       }
 
       // The content-launch page titles itself with the readable case name (e.g
@@ -1321,6 +1367,7 @@ const exported = {
         // ignore
       }
       if (/harvard business publishing/i.test(docTitle)) docTitle = "";
+      diag.docTitle = docTitle;
 
       // The HBS page may be the top frame or an embedded tool iframe.
       for (const frame of page.frames()) {
@@ -1347,11 +1394,20 @@ const exported = {
               credentials: "include",
               redirect: "follow",
             });
-            if (!res.ok) return { ok: false };
             const ct = res.headers.get("content-type") || "";
             const cd = res.headers.get("content-disposition") || "";
+            // Report the form action, status, and headers on every path so a
+            // failed download can be diagnosed (e.g a 403 or an HTML error page
+            // returned where a PDF was expected).
+            const meta = {
+              formAction: form.action,
+              status: res.status,
+              contentType: ct,
+              contentDisposition: cd,
+            };
+            if (!res.ok) return { ok: false, ...meta };
             if (!/pdf|octet-stream/i.test(ct) && !/\.pdf/i.test(cd)) {
-              return { ok: false };
+              return { ok: false, notPdf: true, ...meta };
             }
             const bytes = new Uint8Array(await res.arrayBuffer());
             let binary = "";
@@ -1367,14 +1423,20 @@ const exported = {
               base64: btoa(binary),
               contentDisposition: cd,
               availabilityId,
+              ...meta,
             };
           });
         } catch (e) {
+          // Record that this frame was probed but threw, then move on.
+          diag.frames.push({ frameUrl: safeFrameUrl(frame), error: e.message });
           result = null;
         }
 
         if (result === null) continue; // no PDF form in this frame
-        if (!result.ok) return { handled: true, ok: false };
+        // Snapshot the frame's form/POST outcome (without the PDF bytes).
+        const { base64, ...frameMeta } = result;
+        diag.frames.push({ frameUrl: safeFrameUrl(frame), ...frameMeta });
+        if (!result.ok) return fail("pdf-post-failed");
 
         // Prefer the readable case title; otherwise the server's filename (the
         // regex tolerates spaces around '=', which HBS emits), then the id.
@@ -1411,9 +1473,10 @@ const exported = {
       }
 
       // HBS launch, but no downloadable PDF (e.g video / online reader only).
-      return { handled: true, ok: false };
+      return fail("no-pdf-form");
     } catch (e) {
-      return { handled: true, ok: false };
+      diag.error = e.message || String(e);
+      return fail("exception");
     } finally {
       if (page) await page.close().catch(() => {});
     }
@@ -1471,7 +1534,7 @@ const exported = {
         hostname = new URL(url).hostname.toLowerCase();
       } catch (e) {
         problematic.push(url);
-        report.recordFailure(url, "invalid URL");
+        report.recordFailure(url, "invalid URL", { destDir: dir });
         continue;
       }
 
@@ -1482,11 +1545,15 @@ const exported = {
           : await this.downloadExternalResource(page.browser(), url, dir, i);
         if (!success) {
           problematic.push(url);
-          report.recordFailure(url, this.describeUndownloadable(url, { video: isVideo }));
+          report.recordFailure(
+            url,
+            this.describeUndownloadable(url, { video: isVideo }),
+            { destDir: dir }
+          );
         }
       } catch (e) {
         problematic.push(url);
-        report.recordFailure(url, e.message || "download error");
+        report.recordFailure(url, e.message || "download error", { destDir: dir });
       }
     }
 
@@ -1509,7 +1576,7 @@ const exported = {
       }
       if (!ok) {
         problematic.push(url);
-        report.recordFailure(url, reason);
+        report.recordFailure(url, reason, { destDir: dir });
       }
     }
 

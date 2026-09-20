@@ -107,7 +107,7 @@ jobs:
           path: artifacts
 
       - name: Publish rolling "latest" release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # A single rolling release that always holds the newest main build,
           # so users have a stable download URL (…/releases/latest).

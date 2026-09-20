@@ -5,6 +5,7 @@ import inquirer from "inquirer";
 import helpers from "./scrapers/helpers.js";
 import { runScrape } from "./core/scrape.js";
 import { runLogin } from "./core/login.js";
+import { runImport } from "./core/import.js";
 import { renderTui } from "./tui/app.js";
 import { ensureChrome } from "./core/chrome.js";
 
@@ -197,6 +198,82 @@ program
       process.exit(1);
     }
   });
+
+// `import` subcommand: file manually-obtained content into the scraper's own
+// layout, using the gaps recorded in report-skipped.csv / download-diagnostics.
+// No browser is needed — this is a pure filesystem operation.
+program
+  .command("import [output]")
+  .description(
+    "import manually-downloaded files into the scrape output, mapping them to the gaps in report-skipped.csv"
+  )
+  .option("-o, --output <dir>", "output directory to import into", "courses")
+  .option(
+    "--from <path>",
+    "extra worklist source (a .csv or .jsonl of gaps) in addition to the output dir's reports"
+  )
+  .option("--manifest <path>", "manifest file mapping dropped files to gap URLs (default <dir>/import/manifest.csv)")
+  .option("--dir <path>", "folder holding the dropped files (default <output>/import)")
+  .option("--interactive", "prompt to match each unmapped dropped file to a gap")
+  .option("--dry-run", "show what would be imported without copying anything")
+  .action(async (output, opts, cmd) => {
+    try {
+      // The parent program also declares --dry-run / -o (for the scrape flow),
+      // and commander routes a colliding flag to the parent, so read merged
+      // (global + local) options to see --dry-run and --output here.
+      const merged = cmd.optsWithGlobals();
+      const dir = output || merged.output || "courses";
+      await runImport(
+        dir,
+        {
+          from: merged.from,
+          manifest: merged.manifest,
+          dir: merged.dir,
+          interactive: !!merged.interactive,
+          dryRun: !!merged.dryRun,
+        },
+        { prompt: promptForMatches }
+      );
+    } catch (e) {
+      helpers.print("ERROR", "IMPORT", e.message || String(e), 0);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Interactive matcher for `import --interactive`: for each dropped file not yet
+ * in the manifest, asks which gap it fills. Returns manifest entries.
+ * @param {Array} worklist gaps from the reports
+ * @param {string[]} files unmapped dropped file basenames
+ * @param {Array} _log the import log (unused here)
+ * @param {{gapLabel:function}} helpersIn label helper from core/import.js
+ * @returns {Promise<Array<{file:string,url:string}>>}
+ */
+async function promptForMatches(worklist, files, _log, { gapLabel }) {
+  const entries = [];
+  for (const file of files) {
+    const { url } = await inquirer.prompt([
+      {
+        type: "list",
+        name: "url",
+        message: `Which item is "${file}" for?`,
+        pageSize: 15,
+        choices: [
+          ...worklist.map((row) => ({
+            name: `${gapLabel(row)}  —  ${row.reason || "gap"}${
+              row.courseName ? `  [${row.courseName}]` : ""
+            }`,
+            value: row.url,
+          })),
+          new inquirer.Separator(),
+          { name: "Skip this file", value: "" },
+        ],
+      },
+    ]);
+    if (url) entries.push({ file, url });
+  }
+  return entries;
+}
 
 program.action(async (url, options) => {
   try {
