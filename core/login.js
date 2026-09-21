@@ -72,18 +72,28 @@ export function videoAuthHosts(config = {}) {
   return [...new Set(hosts)];
 }
 
+/** Hostname(s) whose session cookies Study.Net downloads need. */
+export function studyNetAuthHosts() {
+  return ["study.net"];
+}
+
 /**
- * Whether the captured cookies include a session for any login-gated video host
- * (matching a host exactly or as a subdomain, ignoring a leading dot).
+ * Whether the captured cookies include a session for any of `hosts` (matching a
+ * host exactly or as a subdomain, ignoring a leading dot).
  * @param {Array<{domain?: string}>} cookies captured cookies
- * @param {string[]} hosts hosts from videoAuthHosts()
+ * @param {string[]} hosts hostnames to look for
  * @returns {boolean}
  */
-export function hasVideoAuthCookies(cookies, hosts) {
+export function hasCookiesForHosts(cookies, hosts) {
   return (cookies || []).some((c) => {
     const d = String(c && c.domain ? c.domain : "").replace(/^\./, "").toLowerCase();
     return hosts.some((h) => d === h || d.endsWith(`.${h}`));
   });
+}
+
+/** Back-compat alias: whether cookies cover the login-gated video host(s). */
+export function hasVideoAuthCookies(cookies, hosts) {
+  return hasCookiesForHosts(cookies, hosts);
 }
 
 /**
@@ -115,76 +125,81 @@ async function freshSession({ url, logger, prompt }) {
     const client = await page.target().createCDPSession();
     let cookies = (await client.send("Network.getAllCookies")).cookies;
 
-    // Verify we captured cookies for the login-gated video host(s) — Panopto —
-    // BEFORE closing the browser, so the user can fix it now rather than
-    // discovering it only when videos silently fail during a scrape. Give one
-    // guided retry (optionally auto-opening a configured Panopto URL) so they
-    // don't have to close and re-run.
+    // Verify we captured cookies for the login-gated content sources — Panopto
+    // (videos) and Study.Net (course-pack materials) — BEFORE closing the
+    // browser, so the user can fix it now rather than discovering it only when
+    // those downloads silently fail during a scrape. Give one guided retry
+    // (auto-opening a configured URL where we have one) so they don't have to
+    // close and re-run.
     const config = readConfig();
-    const authHosts = videoAuthHosts(config);
-    if (!hasVideoAuthCookies(cookies, authHosts)) {
-      logger(
-        "WARNING",
-        "PANOPTO",
-        `No cookies for your video host (${authHosts.join(", ")}) were ` +
-          "captured — Panopto video downloads won't work without them.",
-        0
-      );
+    const sessions = [
+      {
+        name: "Panopto",
+        what: "video downloads",
+        hosts: videoAuthHosts(config),
+        openUrl: String(config.panoptoUrl || "").trim(),
+        manual:
+          "open your Panopto site (e.g. https://<your-org>.hosted.panopto.com) and sign in",
+        tip: 'set "panoptoUrl" in config.json to have it opened for you',
+      },
+      {
+        name: "Study.Net",
+        what: "Study.Net materials downloads",
+        hosts: studyNetAuthHosts(),
+        openUrl: String(config.studyNetUrl || "").trim(),
+        manual:
+          'open one of your courses and click its "Study.Net Materials" tab (that signs you in to Study.Net)',
+        tip: 'set "studyNetUrl" in config.json to have it opened for you',
+      },
+    ];
 
-      // If the user configured their Panopto URL, open it for them so all they
-      // have to do is sign in; otherwise tell them how to reach it themselves.
-      const panoptoUrl = String(config.panoptoUrl || "").trim();
-      if (panoptoUrl) {
-        try {
-          const ptab = await browser.newPage();
-          await ptab.goto(panoptoUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
-          logger(
-            "NOTE",
-            "PANOPTO",
-            `Opened your Panopto site (${panoptoUrl}) in a new tab. Sign in there, ` +
-              "then come back and press Enter to re-check.",
-            0
-          );
-        } catch (e) {
-          logger(
-            "NOTE",
-            "PANOPTO",
-            `Could not open ${panoptoUrl} automatically (${e.message}). Open it ` +
-              "in the same Chrome window and sign in, then press Enter to re-check.",
-            0
-          );
-        }
-      } else {
+    const missing = sessions.filter((s) => !hasCookiesForHosts(cookies, s.hosts));
+    if (missing.length) {
+      for (const s of missing) {
+        const tag = s.name.toUpperCase();
         logger(
-          "NOTE",
-          "PANOPTO",
-          "If you want videos: in the SAME Chrome window, open your Panopto site " +
-            "(e.g. https://<your-org>.hosted.panopto.com) and sign in, then press " +
-            "Enter to re-check. To continue without video support, just press Enter. " +
-            "(Tip: set \"panoptoUrl\" in config.json to have this opened for you.)",
+          "WARNING",
+          tag,
+          `No ${s.name} session cookies were captured — ${s.what} may fail without them.`,
           0
         );
+        // Auto-open a configured URL so the user only has to sign in; otherwise
+        // tell them how to reach the site themselves (with a config tip).
+        if (s.openUrl) {
+          try {
+            const tab = await browser.newPage();
+            await tab.goto(s.openUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+            logger("NOTE", tag, `Opened ${s.openUrl} in a new tab — sign in there.`, 0);
+          } catch (e) {
+            logger("NOTE", tag, `Could not open ${s.openUrl} (${e.message}); ${s.manual} in the same window.`, 0);
+          }
+        } else {
+          logger("NOTE", tag, `To enable it, ${s.manual} in the same Chrome window. (Tip: ${s.tip}.)`, 0);
+        }
       }
 
       await prompt(
-        "Press Enter after signing in to Panopto (or to continue without video support)..."
+        "After signing in to the site(s) above, press Enter to re-check (or press Enter to continue without them)..."
       );
       cookies = (await client.send("Network.getAllCookies")).cookies;
 
-      if (hasVideoAuthCookies(cookies, authHosts)) {
-        logger("NOTE", "PANOPTO", "Panopto cookies captured — video downloads are set up.", 0);
-      } else {
-        logger(
-          "WARNING",
-          "PANOPTO",
-          "Still no Panopto cookies — continuing without video support. Videos " +
-            "will be skipped (and reported) when you scrape. See the README " +
-            '"Cookies for Panopto" section to add them by hand later.',
-          0
-        );
+      for (const s of missing) {
+        const tag = s.name.toUpperCase();
+        if (hasCookiesForHosts(cookies, s.hosts)) {
+          logger("NOTE", tag, `${s.name} cookies captured — ${s.what} are set up.`, 0);
+        } else {
+          logger(
+            "WARNING",
+            tag,
+            `Still no ${s.name} cookies — continuing without it. ${s.what} will be ` +
+              "skipped (and reported) when you scrape; see the README to add these " +
+              "cookies by hand later.",
+            0
+          );
+        }
       }
     } else {
-      logger("NOTE", "PANOPTO", "Panopto/video-host cookies detected — video downloads are set up.", 0);
+      logger("NOTE", "LOGIN", "Panopto and Study.Net session cookies detected.", 0);
     }
     return cookies;
   } finally {
@@ -293,5 +308,7 @@ export default {
   LOGIN_STRATEGIES,
   DEFAULT_LOGIN_MODE,
   videoAuthHosts,
+  studyNetAuthHosts,
+  hasCookiesForHosts,
   hasVideoAuthCookies,
 };

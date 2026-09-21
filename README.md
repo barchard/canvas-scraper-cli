@@ -32,16 +32,18 @@ node index.js login https://<school_domain>
 
 A Chrome window opens at your Canvas domain. Log in normally — single sign-on and two-factor prompts all work, because you're logging in yourself. If you want video downloads, open and sign in to your Panopto site in the same window too. Then return to the terminal and press **Enter**: the scraper reads your session cookies straight out of the browser (including `HttpOnly` cookies like `canvas_session`, which extensions that read `document.cookie` can't see) and writes them to `cookies.json`. No extension and no hand-merging required.
 
-**Panopto check before closing.** After you press Enter, the login flow checks
-whether it captured cookies for your video host (Panopto). If it didn't, it
+**Session checks before closing.** After you press Enter, the login flow checks
+whether it captured cookies for the login-gated content sources — **Panopto**
+(videos) and **Study.Net** (course-pack materials). If either is missing it
 **warns you and gives you a second chance without closing the browser**: sign in
-to your Panopto site in the same window, press Enter again, and it re-checks. If
-you set `"panoptoUrl"` in `config.json` (e.g.
-`"https://<your-org>.hosted.panopto.com"`), it opens that site for you in a new
-tab automatically so you only have to sign in. This way you find out about a
-missing Panopto session right away, instead of when videos silently fail to
-download later. (Press Enter without signing in to continue without video
-support.)
+to the flagged site(s) in the same window — for Panopto, open your Panopto site;
+for Study.Net, open any course's "Study.Net Materials" tab (that signs you in) —
+then press Enter again and it re-checks. If you set `"panoptoUrl"` (and/or
+`"studyNetUrl"`) in `config.json`, it opens that site for you in a new tab
+automatically so you only have to sign in. This way you find out about a missing
+session right away, instead of when those downloads silently fail (and leave an
+empty folder) later. (Press Enter without signing in to continue without that
+source.)
 
 By default the cookies are written to `cookies.json`; pass `-c <path>` to write elsewhere (use the same path you'll pass the scraper). This is a **fresh** login each time — no browser profile is saved, so you log in again whenever your cookies expire.
 
@@ -387,7 +389,7 @@ Give a full course URL to scrape just that one course. It's placed in its own se
 
 The `-v` flag archives the course's **Videos** tab (the Panopto course folder): it launches the Panopto LTI tab while signed in, finds the folder it lands on, and downloads every session as `mp4` via `yt-dlp` into `VIDEOS/`. This requires your Panopto cookies in the cookies file (see [Cookies for Panopto](#cookies-for-panopto-and-other-login-gated-videos)). The nav tab is matched by the label `Videos` by default; if your course names it differently, set `"videosTabLabel"` in `config.json`.
 
-The `-s` flag archives the course's **Study.Net Materials** tab into `STUDYNET/`. Study.Net is a third-party course-pack tool reached through a signed Canvas LTI launch: the scraper opens the tab while signed in, which performs the launch and renders the materials list, then downloads each material (the per-user watermarked PDF / spreadsheet) into `STUDYNET/`. Files are saved **in the instructor's order** with a zero-padded numeric prefix (`01 - <name>.pdf`, `02 - …`) so they sort correctly on disk instead of alphabetically; the numbering matches the list you see in the tab. Website links the instructor included in the list are saved in place as `.url` shortcuts (e.g. `03 - <name> (LINK).url`), keeping the reading list complete and contiguous. Because the launch itself establishes the Study.Net session in the browser, your **Canvas** cookies are normally sufficient — you do **not** need to add Study.Net cookies to the cookies file. (You can still add a `www.study.net` `PHPSESSID` cookie as a fallback; note that a Study.Net session is short-lived — roughly a day.) The nav tab is matched by the label `Study.Net Materials` by default; if your course names it differently, set `"studyNetTabLabel"` in `config.json`. Anything the tool refuses to hand over (view-only content) is skipped with a warning that points you to the tab so you can open it manually.
+The `-s` flag archives the course's **Study.Net Materials** tab into `STUDYNET/`. Study.Net is a third-party course-pack tool reached through a signed Canvas LTI launch: the scraper opens the tab while signed in, which performs the launch and renders the materials list, then downloads each material (the per-user watermarked PDF / spreadsheet) into `STUDYNET/`. Files are saved **in the instructor's order** with a zero-padded numeric prefix (`01 - <name>.pdf`, `02 - …`) so they sort correctly on disk instead of alphabetically; the numbering matches the list you see in the tab. Website links the instructor included in the list are saved in place as `.url` shortcuts (e.g. `03 - <name> (LINK).url`), keeping the reading list complete and contiguous. The launch usually establishes the Study.Net session on its own, but in practice it's much more reliable if your captured cookies already include a Study.Net session — so if you **never opened a Study.Net page while logging in**, downloads can fail. The easiest way to get one is to open any course's **Study.Net Materials** tab once in the browser during the interactive `login` flow; the login checker now flags a missing Study.Net session and prompts you to do exactly that before it saves your cookies (you can also add a `www.study.net` `PHPSESSID` cookie by hand, or set `"studyNetUrl"` in `config.json` to have the login flow open it for you — note a Study.Net session is short-lived, roughly a day). If the session is missing at scrape time, the run **reports it clearly** (rather than failing silently) and doesn't leave an empty `STUDYNET/` folder behind. The nav tab is matched by the label `Study.Net Materials` by default; if your course names it differently, set `"studyNetTabLabel"` in `config.json`. Anything the tool refuses to hand over (view-only content) is skipped with a warning that points you to the tab so you can open it manually.
 
 ### Transcribing videos
 

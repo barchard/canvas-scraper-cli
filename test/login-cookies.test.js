@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { videoAuthHosts, hasVideoAuthCookies } from "../core/login.js";
+import {
+  videoAuthHosts,
+  studyNetAuthHosts,
+  hasCookiesForHosts,
+  hasVideoAuthCookies,
+} from "../core/login.js";
 
 test("videoAuthHosts always includes Panopto and skips public providers", () => {
   assert.deepEqual(videoAuthHosts({}), ["panopto.com"]);
@@ -54,5 +59,29 @@ test("a configured login-gated extra host is detected", () => {
   assert.equal(
     hasVideoAuthCookies([{ domain: "video.media.university.edu" }], hosts),
     true
+  );
+});
+
+test("studyNetAuthHosts is study.net, and its cookies are detected across subdomains", () => {
+  const hosts = studyNetAuthHosts();
+  assert.deepEqual(hosts, ["study.net"]);
+
+  // The session shows up on www./lti./watermark. subdomains after the launch.
+  assert.equal(hasCookiesForHosts([{ name: "PHPSESSID", domain: "www.study.net" }], hosts), true);
+  assert.equal(hasCookiesForHosts([{ domain: "watermark.study.net" }], hosts), true);
+  assert.equal(hasCookiesForHosts([{ domain: "study.net" }], hosts), true);
+
+  // Canvas-only cookies don't count as a Study.Net session.
+  assert.equal(hasCookiesForHosts([{ domain: ".instructure.com" }], hosts), false);
+  // A lookalike domain must not match.
+  assert.equal(hasCookiesForHosts([{ domain: "notstudy.net.evil.com" }], hosts), false);
+});
+
+test("hasVideoAuthCookies is an alias of hasCookiesForHosts", () => {
+  const cookies = [{ domain: "org.hosted.panopto.com" }];
+  const hosts = videoAuthHosts({});
+  assert.equal(
+    hasVideoAuthCookies(cookies, hosts),
+    hasCookiesForHosts(cookies, hosts)
   );
 });

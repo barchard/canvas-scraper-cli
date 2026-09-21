@@ -217,6 +217,17 @@ async function scrapeVideos(browser, cookies, url, dir) {
   } finally {
     if (coursePage) await coursePage.close().catch(() => {});
     if (toolPage) await toolPage.close().catch(() => {});
+    // Don't leave an empty VIDEOS/ behind when nothing downloaded (no tab, a
+    // cookie wall, an empty folder) — it just looks like a broken download.
+    if (!helpers.dryRun) {
+      try {
+        if (fs.existsSync(videosDir) && fs.readdirSync(videosDir).length === 0) {
+          fs.rmdirSync(videosDir);
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
     console.log("=== DONE SCRAPING VIDEOS ===");
   }
 }

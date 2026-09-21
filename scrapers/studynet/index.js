@@ -241,7 +241,10 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
       helpers.print(
         "WARNING",
         "STUDY.NET",
-        `Could not reach the Study.Net materials list. Open it manually: ${tabUrl}`,
+        `Could not reach the Study.Net materials list — this usually means your ` +
+          `Study.Net session isn't established. In a browser signed in to Canvas, ` +
+          `open the course's "${label}" tab once (that signs you in to Study.Net), ` +
+          `then re-run. You can open it here: ${tabUrl}`,
         0
       );
       return;
@@ -324,11 +327,17 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
     }
 
     if (problems.length) {
+      const allFailed = files.length > 0 && problems.length === files.length;
       helpers.print(
         "WARNING",
         "STUDY.NET",
-        `${problems.length} item(s) could not be downloaded (view-only or unavailable). ` +
-          `Open the Study.Net tab to view them: ${tabUrl}`,
+        allFailed
+          ? `All ${files.length} downloadable material(s) failed — your Study.Net ` +
+              `session is probably missing or expired. In a browser signed in to ` +
+              `Canvas, open the course's "${label}" tab once to establish the ` +
+              `session, then re-run. Tab: ${tabUrl}`
+          : `${problems.length} item(s) could not be downloaded (view-only or ` +
+              `unavailable). Open the Study.Net tab to view them: ${tabUrl}`,
         0
       );
     }
@@ -337,6 +346,18 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
   } finally {
     if (coursePage) await coursePage.close().catch(() => {});
     if (toolPage) await toolPage.close().catch(() => {});
+    // Don't leave an empty STUDYNET/ behind when nothing was saved (no tab, no
+    // session, all view-only/unavailable) — an empty folder just looks like a
+    // broken download. Best-effort; only removes it when truly empty.
+    if (!helpers.dryRun) {
+      try {
+        if (fs.existsSync(studynetDir) && fs.readdirSync(studynetDir).length === 0) {
+          fs.rmdirSync(studynetDir);
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
     console.log("=== DONE SCRAPING STUDY.NET ===");
   }
 }
