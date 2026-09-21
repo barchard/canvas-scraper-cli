@@ -8,6 +8,7 @@ import { Browser, Page } from "puppeteer";
 import { Readable } from "stream";
 
 import report from "./report.js";
+import manifest from "./manifest.js";
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -143,6 +144,19 @@ const exported = {
    * @returns {Promise<boolean>} whether or not the file was downloaded successfully
    */
   async downloadFile(url, cookies, dir, backupName) {
+    // Resume: if a complete copy is already on disk (per the course manifest),
+    // skip the fetch entirely. --force bypasses this. Dry-run ignores the
+    // manifest — it probes accessibility rather than trusting prior state.
+    if (!this.dryRun) {
+      const existing = manifest.completePath(url);
+      if (existing) {
+        manifest.markSeen(url);
+        report.record(existing, url);
+        this.print("NOTE", "SKIP", `already downloaded ${path.basename(existing)}`, 1);
+        return true;
+      }
+    }
+
     const response = await fetch(url, {
       method: "GET",
       credentials: "include",
@@ -202,8 +216,15 @@ const exported = {
 
     const filePath = path.join(dir, filename);
     await this.streamToFile(response, filePath, filename);
-    if (ok) report.record(filePath, url);
-    else report.recordFailure(url, "no file returned (missing content-disposition)");
+    if (ok) {
+      report.record(filePath, url);
+      manifest.record(url, filePath, {
+        bytes: Number(response.headers.get("content-length")) || 0,
+        etag: response.headers.get("etag") || "",
+      });
+    } else {
+      report.recordFailure(url, "no file returned (missing content-disposition)");
+    }
     return ok;
   },
 
@@ -677,6 +698,17 @@ const exported = {
    * @returns {Promise<boolean>} whether the file was downloaded successfully
    */
   async downloadExternalFile(url, dir, backupName) {
+    // Resume: skip when a complete copy is already on disk (see downloadFile).
+    if (!this.dryRun) {
+      const existing = manifest.completePath(url);
+      if (existing) {
+        manifest.markSeen(url);
+        report.record(existing, url);
+        this.print("NOTE", "SKIP", `already downloaded ${path.basename(existing)}`, 1);
+        return true;
+      }
+    }
+
     let response;
     try {
       response = await fetch(url, { method: "GET", redirect: "follow" });
@@ -736,6 +768,10 @@ const exported = {
     const filePath = path.join(dir, filename);
     await this.streamToFile(response, filePath, filename);
     report.record(filePath, url);
+    manifest.record(url, filePath, {
+      bytes: Number(response.headers.get("content-length")) || 0,
+      etag: response.headers.get("etag") || "",
+    });
     return true;
   },
 

@@ -145,6 +145,16 @@ const flagDef = [
     description:
       "wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk",
   },
+  {
+    type: "confirm",
+    name: "force",
+    message:
+      "Do you want to force re-downloading files already marked complete (e.g. if you suspect a file on disk is corrupt)?",
+    default: false,
+    flags: "--force",
+    description:
+      "re-download assets even when the manifest says they're already complete (default: trust the manifest and skip them)",
+  },
 ];
 
 const program = new Command();

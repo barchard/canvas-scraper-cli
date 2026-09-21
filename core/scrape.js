@@ -5,6 +5,7 @@ import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
 import scrapers from "../scrapers/index.js";
 import report from "../scrapers/report.js";
+import manifest from "../scrapers/manifest.js";
 import wiki from "../scrapers/wiki.js";
 import octarine from "../scrapers/octarine.js";
 
@@ -219,6 +220,12 @@ async function scrapeCourse(
   // Attribute every asset downloaded below to this course in the report.
   report.setCourse(courseName, courseUrl);
 
+  // Load this course's download manifest so downloaders can skip files already
+  // on disk and re-fetch only what's missing/incomplete. Skipped in a dry-run
+  // (which writes nothing and probes accessibility instead). A --fresh run just
+  // wiped the folder, so the manifest starts empty and everything re-downloads.
+  if (!helpers.dryRun) manifest.load(courseDir, courseUrl);
+
   const page = await helpers.newPage(browser, cookies, courseUrl);
   if (page.status !== 200) {
     helpers.print(
@@ -248,6 +255,11 @@ async function scrapeCourse(
     onProgress({ type: "phase", label, courseName });
     await fn(browser, cookies, courseUrl, courseDir);
   }
+
+  // Persist the manifest so the next run can resume this course. Reset the
+  // current-course state either way so it never leaks into the next course.
+  if (!helpers.dryRun) manifest.save();
+  manifest.reset();
 
   helpers.print("INFO", "COURSE", `Finished ${courseUrl}`, 0);
 }
@@ -395,6 +407,11 @@ export async function runScrape(url, options, hooks = {}) {
   // place (a safe, repeatable re-run). Set/reset like dryRun.
   const prevFresh = helpers.fresh;
   helpers.setFresh(!!options.fresh);
+
+  // --force re-downloads assets the manifest already marks complete (in case an
+  // on-disk file is suspected corrupt); the default trusts the manifest.
+  const prevForce = manifest.force;
+  manifest.setForce(!!options.force);
 
   // Reset per-run error and diagnostic tracking so the reports reflect only
   // this run.
@@ -602,6 +619,7 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);
     helpers.setFresh(prevFresh);
+    manifest.setForce(prevForce);
   }
 }
 
