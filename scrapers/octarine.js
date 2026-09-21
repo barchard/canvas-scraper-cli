@@ -80,7 +80,10 @@ function build(dir, rows = []) {
   // (errors.csv, download-diagnostics.jsonl, import/) are present.
   for (const name of fs.readdirSync(dir)) {
     if (reserved.has(name)) continue;
-    fs.renameSync(path.join(dir, name), path.join(attachDir, name));
+    // Merge-move so re-running is idempotent: when .attachments/<name> already
+    // exists (a resumed run, or leftovers from an interrupted reorg), fold the
+    // new files in rather than throwing ENOTEMPTY on a wholesale rename.
+    mergeMove(path.join(dir, name), path.join(attachDir, name));
   }
 
   return reindex(dir, rows);
@@ -283,6 +286,30 @@ function humanSize(bytes) {
 }
 
 /** Lists every file under `dir` recursively, returning full paths. */
+/**
+ * Moves `src` onto `dest`, merging directories and overwriting files when
+ * `dest` already exists (falling back to a fast rename when it doesn't). Lets
+ * the sweep re-run without colliding with a previously-organized
+ * `.attachments/`.
+ */
+function mergeMove(src, dest) {
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(src, dest);
+    return;
+  }
+  if (!fs.statSync(src).isDirectory()) {
+    fs.rmSync(dest, { force: true });
+    fs.renameSync(src, dest);
+    return;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const name of fs.readdirSync(src)) {
+    mergeMove(path.join(src, name), path.join(dest, name));
+  }
+  fs.rmdirSync(src);
+}
+
 function listFilesRecursive(dir) {
   const out = [];
   let entries;

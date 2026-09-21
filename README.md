@@ -189,16 +189,17 @@ Three escape hatches:
   of just flagging them) — use it to keep the output an exact mirror of the
   current course. Also scoped to the categories you scraped.
 
-> **Note on `--wiki` / `--octarine`:** resume tracks the **default** output
-> layout. The resume manifest and `.yt-dlp-archive.txt` are never cataloged as
-> course sources, and they travel with a course folder when `--wiki` /
-> `--octarine` move it — so nothing is destroyed. But those layouts move files
-> out of the canonical `<course>/CATEGORY/…` tree the scraper writes to, so a
-> later **plain re-scrape won't find the relocated files** and would download
-> them again. Recommended workflow: resume in the default layout until the
-> course is complete, and apply `--wiki` / `--octarine` as a final step (or
-> re-run the organizer, which reindexes in place). Resuming *through* a reorg is
-> a planned enhancement.
+**Resume works under `--wiki` / `--octarine` too.** Those layouts relocate each
+course into `raw/<course>` / `.attachments/<course>` (keeping its internal
+structure), and the resume manifest and `.yt-dlp-archive.txt` travel inside the
+folder with it. On the next run the scraper detects the relocated course and
+**resumes directly into it** (logged as `[NOTE] RESUME … layout`) — skipping
+files already there and downloading only what's new — rather than re-fetching
+everything into a fresh canonical folder. Re-applying `--wiki` / `--octarine` is
+idempotent: the organizer merges any new files into the existing layout and
+regenerates the index, so `--all --wiki` is safe to run over and over. `--fresh`
+wipes the course everywhere (canonical **and** any reorganized copy) for a clean
+slate.
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 

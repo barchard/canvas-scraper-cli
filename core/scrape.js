@@ -1,5 +1,6 @@
 import fs from "fs";
 import http from "http";
+import path from "path";
 
 import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
@@ -198,6 +199,29 @@ function courseFolderName(name, id, used) {
   return folder;
 }
 
+// The subfolders --wiki and --octarine relocate each course into (preserving
+// the course's internal CATEGORY structure). Used to resume into an
+// already-reorganized output instead of re-downloading into the canonical tree.
+const REORG_ROOTS = ["raw", ".attachments"];
+
+/**
+ * If a previous --wiki / --octarine run moved this course out of the canonical
+ * `<output>/<course>` tree into `<output>/raw/<course>` or
+ * `<output>/.attachments/<course>`, returns that location so the scrape resumes
+ * into it (files, manifest, and video archive all travel with the folder).
+ * Returns null when the course is still in the canonical layout.
+ * @param {string} outputDir the main output directory
+ * @param {string} courseFolder the course's folder name
+ * @returns {string|null}
+ */
+export function reorganizedCourseDir(outputDir, courseFolder) {
+  for (const root of REORG_ROOTS) {
+    const loc = path.join(outputDir, root, courseFolder);
+    if (fs.existsSync(loc)) return loc;
+  }
+  return null;
+}
+
 /**
  * Scrapes one course into `courseDir` (homepage PDF + the selected sections).
  */
@@ -218,11 +242,32 @@ async function scrapeCourse(
   //
   // Default (resume): keep whatever is already on disk and reconcile in place —
   // a re-run only re-downloads what's missing or incomplete, so it's safe to
-  // run repeatedly. --fresh restores the old wipe-and-rebuild behavior for a
-  // clean slate.
+  // run repeatedly. If a previous --wiki / --octarine run relocated this course,
+  // resume into that same location so the scrape stays consistent with the
+  // reorganized layout (and finds the manifest that travelled with it) instead
+  // of re-downloading into a fresh canonical folder. --fresh wipes the course
+  // everywhere — canonical and any reorganized copy — for a clean slate.
+  const outputDir = path.dirname(courseDir);
+  const courseFolder = path.basename(courseDir);
   if (!helpers.dryRun) {
-    if (helpers.fresh && fs.existsSync(courseDir)) {
-      fs.rmSync(courseDir, { recursive: true, force: true });
+    if (helpers.fresh) {
+      for (const p of [
+        courseDir,
+        ...REORG_ROOTS.map((root) => path.join(outputDir, root, courseFolder)),
+      ]) {
+        if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+      }
+    } else {
+      const relocated = reorganizedCourseDir(outputDir, courseFolder);
+      if (relocated) {
+        helpers.print(
+          "NOTE",
+          "RESUME",
+          `Resuming into existing ${path.relative(outputDir, relocated)} layout`,
+          0
+        );
+        courseDir = relocated;
+      }
     }
     fs.mkdirSync(courseDir, { recursive: true });
   }
