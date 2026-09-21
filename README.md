@@ -32,6 +32,17 @@ node index.js login https://<school_domain>
 
 A Chrome window opens at your Canvas domain. Log in normally — single sign-on and two-factor prompts all work, because you're logging in yourself. If you want video downloads, open and sign in to your Panopto site in the same window too. Then return to the terminal and press **Enter**: the scraper reads your session cookies straight out of the browser (including `HttpOnly` cookies like `canvas_session`, which extensions that read `document.cookie` can't see) and writes them to `cookies.json`. No extension and no hand-merging required.
 
+**Panopto check before closing.** After you press Enter, the login flow checks
+whether it captured cookies for your video host (Panopto). If it didn't, it
+**warns you and gives you a second chance without closing the browser**: sign in
+to your Panopto site in the same window, press Enter again, and it re-checks. If
+you set `"panoptoUrl"` in `config.json` (e.g.
+`"https://<your-org>.hosted.panopto.com"`), it opens that site for you in a new
+tab automatically so you only have to sign in. This way you find out about a
+missing Panopto session right away, instead of when videos silently fail to
+download later. (Press Enter without signing in to continue without video
+support.)
+
 By default the cookies are written to `cookies.json`; pass `-c <path>` to write elsewhere (use the same path you'll pass the scraper). This is a **fresh** login each time — no browser profile is saved, so you log in again whenever your cookies expire.
 
 You can also fold the login into a scrape in one shot with the `--login` flag — it captures cookies first, then scrapes:
@@ -46,7 +57,7 @@ If you'd rather not use the interactive flow, log into Canvas in your browser an
 
 ### Cookies for Panopto (and other login-gated videos)
 
-Panopto support is built in — `panopto.com` and its subdomains (e.g. `*.hosted.panopto.com`) are already recognized, so you **do not** need to change `config.json` to download Panopto videos.
+Panopto support is built in — `panopto.com` and its subdomains (e.g. `*.hosted.panopto.com`) are already recognized, so you **do not** need to change `config.json` to download Panopto videos. Optionally, set `"panoptoUrl"` in `config.json` to your Panopto site (e.g. `"https://<your-org>.hosted.panopto.com"`); the interactive `login` flow will then open it for you automatically if it notices your Panopto cookies are missing.
 
 There is **no separate Panopto cookies file**. The scraper uses one cookies file for everything: it authenticates Canvas with it and also converts it into the cookie file it hands to `yt-dlp`. To download login-gated Panopto videos, that same file must also contain your Panopto session cookies.
 

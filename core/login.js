@@ -35,6 +35,57 @@ import helpers from "../scrapers/helpers.js";
 /** Fields Chrome's CDP sameSite may report that puppeteer's setCookie accepts. */
 const VALID_SAME_SITE = new Set(["Strict", "Lax", "None"]);
 
+// Public video providers that serve without a login, so their cookies aren't
+// needed for downloads — excluded from the "did we capture auth cookies?" check.
+const PUBLIC_VIDEO_HOSTS = new Set([
+  "youtube.com",
+  "youtu.be",
+  "youtube-nocookie.com",
+  "vimeo.com",
+]);
+
+/** Best-effort read of config.json from the working directory (empty on failure). */
+function readConfig() {
+  try {
+    return JSON.parse(fs.readFileSync("config.json"));
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * Hostnames whose session cookies are needed for login-gated video downloads:
+ * Panopto (always) plus any non-public hosts the user added to config.json's
+ * `videoHosts`. Public providers (YouTube, Vimeo) are excluded — they need no
+ * login, so their absence from the cookie jar isn't a problem.
+ * @param {object} [config] parsed config.json
+ * @returns {string[]}
+ */
+export function videoAuthHosts(config = {}) {
+  const hosts = ["panopto.com"];
+  if (Array.isArray(config.videoHosts)) {
+    for (const h of config.videoHosts) {
+      const s = String(h).toLowerCase().trim();
+      if (s && !PUBLIC_VIDEO_HOSTS.has(s)) hosts.push(s);
+    }
+  }
+  return [...new Set(hosts)];
+}
+
+/**
+ * Whether the captured cookies include a session for any login-gated video host
+ * (matching a host exactly or as a subdomain, ignoring a leading dot).
+ * @param {Array<{domain?: string}>} cookies captured cookies
+ * @param {string[]} hosts hosts from videoAuthHosts()
+ * @returns {boolean}
+ */
+export function hasVideoAuthCookies(cookies, hosts) {
+  return (cookies || []).some((c) => {
+    const d = String(c && c.domain ? c.domain : "").replace(/^\./, "").toLowerCase();
+    return hosts.some((h) => d === h || d.endsWith(`.${h}`));
+  });
+}
+
 /**
  * "fresh" strategy: open a visible browser at the Canvas domain, wait for the
  * user to finish logging in (SSO / 2FA and all), then read every cookie in the
@@ -62,7 +113,79 @@ async function freshSession({ url, logger, prompt }) {
     // Network.getAllCookies returns every cookie in the browser (all domains,
     // HttpOnly included) — one shot captures Canvas and Panopto together.
     const client = await page.target().createCDPSession();
-    const { cookies } = await client.send("Network.getAllCookies");
+    let cookies = (await client.send("Network.getAllCookies")).cookies;
+
+    // Verify we captured cookies for the login-gated video host(s) — Panopto —
+    // BEFORE closing the browser, so the user can fix it now rather than
+    // discovering it only when videos silently fail during a scrape. Give one
+    // guided retry (optionally auto-opening a configured Panopto URL) so they
+    // don't have to close and re-run.
+    const config = readConfig();
+    const authHosts = videoAuthHosts(config);
+    if (!hasVideoAuthCookies(cookies, authHosts)) {
+      logger(
+        "WARNING",
+        "PANOPTO",
+        `No cookies for your video host (${authHosts.join(", ")}) were ` +
+          "captured — Panopto video downloads won't work without them.",
+        0
+      );
+
+      // If the user configured their Panopto URL, open it for them so all they
+      // have to do is sign in; otherwise tell them how to reach it themselves.
+      const panoptoUrl = String(config.panoptoUrl || "").trim();
+      if (panoptoUrl) {
+        try {
+          const ptab = await browser.newPage();
+          await ptab.goto(panoptoUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+          logger(
+            "NOTE",
+            "PANOPTO",
+            `Opened your Panopto site (${panoptoUrl}) in a new tab. Sign in there, ` +
+              "then come back and press Enter to re-check.",
+            0
+          );
+        } catch (e) {
+          logger(
+            "NOTE",
+            "PANOPTO",
+            `Could not open ${panoptoUrl} automatically (${e.message}). Open it ` +
+              "in the same Chrome window and sign in, then press Enter to re-check.",
+            0
+          );
+        }
+      } else {
+        logger(
+          "NOTE",
+          "PANOPTO",
+          "If you want videos: in the SAME Chrome window, open your Panopto site " +
+            "(e.g. https://<your-org>.hosted.panopto.com) and sign in, then press " +
+            "Enter to re-check. To continue without video support, just press Enter. " +
+            "(Tip: set \"panoptoUrl\" in config.json to have this opened for you.)",
+          0
+        );
+      }
+
+      await prompt(
+        "Press Enter after signing in to Panopto (or to continue without video support)..."
+      );
+      cookies = (await client.send("Network.getAllCookies")).cookies;
+
+      if (hasVideoAuthCookies(cookies, authHosts)) {
+        logger("NOTE", "PANOPTO", "Panopto cookies captured — video downloads are set up.", 0);
+      } else {
+        logger(
+          "WARNING",
+          "PANOPTO",
+          "Still no Panopto cookies — continuing without video support. Videos " +
+            "will be skipped (and reported) when you scrape. See the README " +
+            '"Cookies for Panopto" section to add them by hand later.',
+          0
+        );
+      }
+    } else {
+      logger("NOTE", "PANOPTO", "Panopto/video-host cookies detected — video downloads are set up.", 0);
+    }
     return cookies;
   } finally {
     await browser.close().catch(() => {});
@@ -164,4 +287,11 @@ export async function runLogin(url, options = {}) {
   return cookiesPath;
 }
 
-export default { runLogin, getLoginStrategy, LOGIN_STRATEGIES, DEFAULT_LOGIN_MODE };
+export default {
+  runLogin,
+  getLoginStrategy,
+  LOGIN_STRATEGIES,
+  DEFAULT_LOGIN_MODE,
+  videoAuthHosts,
+  hasVideoAuthCookies,
+};
