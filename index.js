@@ -155,6 +155,16 @@ const flagDef = [
     description:
       "re-download assets even when the manifest says they're already complete (default: trust the manifest and skip them)",
   },
+  {
+    type: "confirm",
+    name: "prune",
+    message:
+      "Do you want to delete local files whose source is no longer in the course (e.g. archived/removed content)?",
+    default: false,
+    flags: "--prune",
+    description:
+      "delete local files whose source is gone from the course (default: keep them, only flag them in the manifest)",
+  },
 ];
 
 const program = new Command();

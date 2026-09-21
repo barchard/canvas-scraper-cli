@@ -123,6 +123,7 @@ Options:
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
   --fresh                  wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk (default: false)
   --force                  re-download assets even when the manifest says they're already complete (default: trust the manifest and skip them) (default: false)
+  --prune                  delete local files whose source is gone from the course (default: keep them, only flag them in the manifest) (default: false)
   --all                    scrape all content types (-a -m -q -v -s)
   --courses <ids>          comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses
   --tui                    run with the interactive terminal UI (Ink)
@@ -134,7 +135,7 @@ Commands:
   login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started")
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, `--octarine`, `--fresh`, and `--force` are separate modifiers — they are **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, `--octarine`, `--fresh`, `--force`, and `--prune` are separate modifiers — they are **not** included in "scrape all".)
 
 ### Resuming a scrape (`--fresh`, `--force`)
 
@@ -158,13 +159,30 @@ run never leaves a truncated file that a later run would trust as complete. A
 leftover `*.part` file means that download was interrupted (it will be re-fetched
 next run).
 
-Two escape hatches:
+**Content that locks, unlocks, or is archived.** Because courses change as the
+term progresses, a re-run reconciles state rather than assuming it's fixed:
+
+- **Locked → unlocked:** an item that was inaccessible (so nothing was saved)
+  simply downloads on the run after it opens up — resume fills the gap.
+- **Downloaded → locked:** once a file is on disk it's skipped on later runs, so
+  a now-locked item keeps the copy you already have (the scraper never even
+  re-requests the locked endpoint).
+- **Archived / removed:** an asset the manifest recorded but that's no longer
+  referenced anywhere in the scraped course is flagged `removed` in the manifest
+  and, by default, **kept on disk** (a run logs `[NOTE] RESUME … kept on
+  disk`). This detection is scoped to the content types you actually scraped, so
+  a partial run (e.g. `-a` only) never touches modules' or quizzes' files.
+
+Three escape hatches:
 
 - `--fresh` deletes each course's folder and re-downloads everything from
   scratch — use it to discard a previous scrape entirely (sibling courses in the
   output directory are left untouched; only the courses in this run are wiped).
 - `--force` keeps the existing files but re-downloads every asset even if the
   manifest marks it complete — use it if you suspect a file on disk is corrupt.
+- `--prune` deletes local files whose source is no longer in the course (instead
+  of just flagging them) — use it to keep the output an exact mirror of the
+  current course. Also scoped to the categories you scraped.
 
 > **Note:** resume currently applies to the default output layout. If you
 > reorganize with `--wiki` or `--octarine` (which move files into `raw/` /

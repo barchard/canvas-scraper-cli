@@ -144,13 +144,16 @@ const exported = {
    * @returns {Promise<boolean>} whether or not the file was downloaded successfully
    */
   async downloadFile(url, cookies, dir, backupName) {
+    // Mark this asset referenced this run (whether it downloads, skips, or
+    // fails) so a still-listed but now-locked item isn't later mistaken for one
+    // whose source was removed from the course.
+    manifest.markSeen(url);
     // Resume: if a complete copy is already on disk (per the course manifest),
     // skip the fetch entirely. --force bypasses this. Dry-run ignores the
     // manifest — it probes accessibility rather than trusting prior state.
     if (!this.dryRun) {
       const existing = manifest.completePath(url);
       if (existing) {
-        manifest.markSeen(url);
         report.record(existing, url);
         this.print("NOTE", "SKIP", `already downloaded ${path.basename(existing)}`, 1);
         return true;
@@ -698,11 +701,12 @@ const exported = {
    * @returns {Promise<boolean>} whether the file was downloaded successfully
    */
   async downloadExternalFile(url, dir, backupName) {
-    // Resume: skip when a complete copy is already on disk (see downloadFile).
+    // Mark referenced this run (see downloadFile), then resume-skip if a
+    // complete copy is already on disk.
+    manifest.markSeen(url);
     if (!this.dryRun) {
       const existing = manifest.completePath(url);
       if (existing) {
-        manifest.markSeen(url);
         report.record(existing, url);
         this.print("NOTE", "SKIP", `already downloaded ${path.basename(existing)}`, 1);
         return true;

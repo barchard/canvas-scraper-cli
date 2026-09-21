@@ -64,6 +64,12 @@ const manifest = {
   enabled: false,
   // --force: re-download matched assets even when the manifest says complete.
   force: false,
+  // --prune: delete local files whose source is gone from the course (default
+  // keeps them, only flagging the entry state).
+  prune: false,
+  // ISO timestamp set when this course's manifest is loaded. An asset whose
+  // last_seen is older was not referenced this run — its source is gone.
+  runStart: "",
   courseDir: "",
   courseUrl: "",
   assets: {},
@@ -79,6 +85,11 @@ const manifest = {
     this.force = !!on;
   },
 
+  /** Turns prune (delete files whose source is gone) mode on or off. */
+  setPrune(on) {
+    this.prune = !!on;
+  },
+
   /**
    * Loads the manifest for a course and makes it current. A missing or
    * unreadable file starts an empty manifest (first scrape of the course).
@@ -91,6 +102,7 @@ const manifest = {
     this.assets = {};
     this.dirs = {};
     this.enabled = true;
+    this.runStart = new Date().toISOString();
     try {
       const raw = JSON.parse(
         fs.readFileSync(path.join(courseDir, MANIFEST_FILE))
@@ -115,6 +127,7 @@ const manifest = {
     this.enabled = false;
     this.courseDir = "";
     this.courseUrl = "";
+    this.runStart = "";
     this.assets = {};
     this.dirs = {};
   },
@@ -225,6 +238,49 @@ const manifest = {
     for (const k of Object.keys(this.dirs)) {
       this.dirs[k] = remap(this.dirs[k]);
     }
+  },
+
+  /**
+   * Reconciles the manifest against what this run referenced, after a course's
+   * selected categories have been scraped. An asset whose last_seen predates
+   * this run's start was not referenced — its source is gone from the course
+   * (unlike a locked-but-still-listed item, whose file we keep and whose
+   * last_seen is refreshed on the skip). Such an asset is flagged
+   * `state:"removed"` and kept by default; under --prune its file is deleted
+   * and the entry removed.
+   *
+   * Only entries under a scraped top-level category are considered, so a
+   * partial run (e.g. only `-a`) never flags another category's files. A
+   * missing/empty `categories` set means "consider everything scraped".
+   * @param {Set<string>} [categories] top-level folder names scraped this run
+   * @returns {{removed: number, pruned: number}} counts for the caller to log
+   */
+  reconcile(categories = null) {
+    const result = { removed: 0, pruned: 0 };
+    if (!this.enabled) return result;
+    for (const k of Object.keys(this.assets)) {
+      const entry = this.assets[k];
+      if (!entry || !entry.path) continue;
+      if (categories && categories.size) {
+        const top = entry.path.split(path.sep)[0];
+        if (!categories.has(top)) continue; // category not scraped this run
+      }
+      const seen = entry.last_seen && entry.last_seen >= this.runStart;
+      if (seen) continue;
+      if (this.prune) {
+        try {
+          fs.rmSync(path.join(this.courseDir, entry.path), { force: true });
+        } catch (e) {
+          /* best-effort */
+        }
+        delete this.assets[k];
+        result.pruned++;
+      } else {
+        entry.state = "removed";
+        result.removed++;
+      }
+    }
+    return result;
   },
 
   /** Persists the manifest to `<courseDir>/.scrape-manifest.json` (atomic). */

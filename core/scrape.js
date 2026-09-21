@@ -163,6 +163,16 @@ const PHASES = [
   ["s", "Study.Net", scrapers.scrapeStudyNet],
 ];
 
+// Top-level output folder each phase writes into — used to scope manifest
+// reconciliation to only the categories a given run actually scraped.
+const CATEGORY_BY_KEY = {
+  a: "ASSIGNMENTS",
+  m: "MODULES",
+  q: "QUIZZES",
+  v: "VIDEOS",
+  s: "STUDYNET",
+};
+
 /**
  * Builds a self-contained, macOS/Windows-safe folder name for a course.
  *
@@ -259,9 +269,35 @@ async function scrapeCourse(
     await fn(browser, cookies, courseUrl, courseDir);
   }
 
-  // Persist the manifest so the next run can resume this course. Reset the
-  // current-course state either way so it never leaks into the next course.
-  if (!helpers.dryRun) manifest.save();
+  // Reconcile: assets no longer referenced by any scraped category are gone
+  // from the course. By default they're just flagged (files kept); --prune
+  // deletes them. Scoped to the categories this run scraped so a partial run
+  // (e.g. only -a) never touches another category's files. Then persist the
+  // manifest so the next run can resume, and reset so state never leaks into
+  // the next course.
+  if (!helpers.dryRun) {
+    const categories = new Set();
+    for (const [key] of PHASES) {
+      if (toScrape[key] && CATEGORY_BY_KEY[key]) categories.add(CATEGORY_BY_KEY[key]);
+    }
+    const { removed, pruned } = manifest.reconcile(categories);
+    if (pruned) {
+      helpers.print(
+        "NOTE",
+        "PRUNE",
+        `Removed ${pruned} local file(s) whose source is no longer in the course`,
+        0
+      );
+    } else if (removed) {
+      helpers.print(
+        "NOTE",
+        "RESUME",
+        `${removed} asset(s) no longer referenced in the course (kept on disk; pass --prune to remove)`,
+        0
+      );
+    }
+    manifest.save();
+  }
   manifest.reset();
 
   helpers.print("INFO", "COURSE", `Finished ${courseUrl}`, 0);
@@ -415,6 +451,11 @@ export async function runScrape(url, options, hooks = {}) {
   // on-disk file is suspected corrupt); the default trusts the manifest.
   const prevForce = manifest.force;
   manifest.setForce(!!options.force);
+
+  // --prune deletes local files whose source is gone from the course; the
+  // default keeps them and only flags the manifest entry.
+  const prevPrune = manifest.prune;
+  manifest.setPrune(!!options.prune);
 
   // Reset per-run error and diagnostic tracking so the reports reflect only
   // this run.
@@ -623,6 +664,7 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setDryRun(prevDryRun);
     helpers.setFresh(prevFresh);
     manifest.setForce(prevForce);
+    manifest.setPrune(prevPrune);
   }
 }
 
