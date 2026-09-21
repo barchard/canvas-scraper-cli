@@ -135,6 +135,36 @@ const flagDef = [
     description:
       "organize output into an Octarine workspace (.attachments/, course notes, Index.md)",
   },
+  {
+    type: "confirm",
+    name: "fresh",
+    message:
+      "Do you want a fresh run (wipe each course folder and re-download everything)?",
+    default: false,
+    flags: "--fresh",
+    description:
+      "wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk",
+  },
+  {
+    type: "confirm",
+    name: "force",
+    message:
+      "Do you want to force re-downloading files already marked complete (e.g. if you suspect a file on disk is corrupt)?",
+    default: false,
+    flags: "--force",
+    description:
+      "re-download assets even when the manifest says they're already complete (default: trust the manifest and skip them)",
+  },
+  {
+    type: "confirm",
+    name: "prune",
+    message:
+      "Do you want to delete local files whose source is no longer in the course (e.g. archived/removed content)?",
+    default: false,
+    flags: "--prune",
+    description:
+      "delete local files whose source is gone from the course (default: keep them, only flag them in the manifest)",
+  },
 ];
 
 const program = new Command();

@@ -81,7 +81,10 @@ function build(dir, rows = []) {
   // errors.csv, download-diagnostics.jsonl, import/ — are present).
   for (const name of fs.readdirSync(dir)) {
     if (RESERVED.has(name)) continue;
-    fs.renameSync(path.join(dir, name), path.join(rawDir, name));
+    // Merge-move so re-running is idempotent: when raw/<name> already exists
+    // (a resumed run, or leftovers from an interrupted reorg), fold the new
+    // files in rather than throwing ENOTEMPTY on a wholesale rename.
+    mergeMove(path.join(dir, name), path.join(rawDir, name));
   }
 
   return reindex(dir, rows);
@@ -316,6 +319,29 @@ function humanSize(bytes) {
   return `${i === 0 ? n : n.toFixed(2)} ${units[i]}`;
 }
 
+/**
+ * Moves `src` onto `dest`, merging directories and overwriting files when
+ * `dest` already exists (falling back to a fast rename when it doesn't). Lets
+ * the sweep re-run without colliding with a previously-organized `raw/`.
+ */
+function mergeMove(src, dest) {
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(src, dest);
+    return;
+  }
+  if (!fs.statSync(src).isDirectory()) {
+    fs.rmSync(dest, { force: true });
+    fs.renameSync(src, dest);
+    return;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const name of fs.readdirSync(src)) {
+    mergeMove(path.join(src, name), path.join(dest, name));
+  }
+  fs.rmdirSync(src);
+}
+
 /** Lists every file under `dir` recursively, returning full paths. */
 function listFilesRecursive(dir) {
   const out = [];
@@ -326,6 +352,10 @@ function listFilesRecursive(dir) {
     return out;
   }
   for (const entry of entries) {
+    // Skip dotfiles (e.g. the resume manifest .scrape-manifest.json and the
+    // .yt-dlp-archive.txt) and in-progress .part files — they're bookkeeping,
+    // not course material, and must not be cataloged as sources.
+    if (entry.name.startsWith(".") || entry.name.endsWith(".part")) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...listFilesRecursive(full));
     else if (entry.isFile()) out.push(full);

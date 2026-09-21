@@ -121,6 +121,9 @@ Options:
   --report                 write a report.csv listing every downloaded asset (default: false)
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
+  --fresh                  wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk (default: false)
+  --force                  re-download assets even when the manifest says they're already complete (default: trust the manifest and skip them) (default: false)
+  --prune                  delete local files whose source is gone from the course (default: keep them, only flag them in the manifest) (default: false)
   --all                    scrape all content types (-a -m -q -v -s)
   --courses <ids>          comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses
   --tui                    run with the interactive terminal UI (Ink)
@@ -132,7 +135,71 @@ Commands:
   login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started")
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, `--octarine`, `--fresh`, `--force`, and `--prune` are separate modifiers — they are **not** included in "scrape all".)
+
+### Resuming a scrape (`--fresh`, `--force`)
+
+**Scraping is safe to run repeatedly.** By default the scraper reconciles each
+course folder **in place** instead of wiping it: files already downloaded are
+kept and **skipped** on the next run, so a re-run fetches only what's missing or
+incomplete. This makes it safe to re-run after an expired cookie, a dropped
+connection, or a `Ctrl-C` — you don't lose (or re-download) the work already
+done, and you pick up where you left off.
+
+How it knows what's already done: each course folder carries a small
+`.scrape-manifest.json` recording every downloaded asset (its source URL, saved
+path, and size). On the next run a file whose manifest entry still matches what's
+on disk is skipped (logged as `[NOTE] SKIP`); a file that's missing or the wrong
+size is re-downloaded. The manifest keys assets by a normalized URL, so a Canvas
+link whose one-time `verifier` token has rotated still matches.
+
+Downloads are also **interruption-safe**: every file is written to a temporary
+`.part` file and renamed into place only once it has fully arrived, so an aborted
+run never leaves a truncated file that a later run would trust as complete. A
+leftover `*.part` file means that download was interrupted (it will be re-fetched
+next run).
+
+**Videos** resume too: `yt-dlp` downloads are recorded in a per-course
+`.yt-dlp-archive.txt` and skipped on the next run (and a partially-downloaded
+video resumes rather than restarting), so re-running never re-fetches gigabytes
+you already have.
+
+**Content that locks, unlocks, or is archived.** Because courses change as the
+term progresses, a re-run reconciles state rather than assuming it's fixed:
+
+- **Locked → unlocked:** an item that was inaccessible (so nothing was saved)
+  simply downloads on the run after it opens up — resume fills the gap.
+- **Downloaded → locked:** once a file is on disk it's skipped on later runs, so
+  a now-locked item keeps the copy you already have (the scraper never even
+  re-requests the locked endpoint).
+- **Archived / removed:** an asset the manifest recorded but that's no longer
+  referenced anywhere in the scraped course is flagged `removed` in the manifest
+  and, by default, **kept on disk** (a run logs `[NOTE] RESUME … kept on
+  disk`). This detection is scoped to the content types you actually scraped, so
+  a partial run (e.g. `-a` only) never touches modules' or quizzes' files.
+
+Three escape hatches:
+
+- `--fresh` deletes each course's folder and re-downloads everything from
+  scratch — use it to discard a previous scrape entirely (sibling courses in the
+  output directory are left untouched; only the courses in this run are wiped).
+- `--force` keeps the existing files but re-downloads every asset even if the
+  manifest marks it complete — use it if you suspect a file on disk is corrupt.
+- `--prune` deletes local files whose source is no longer in the course (instead
+  of just flagging them) — use it to keep the output an exact mirror of the
+  current course. Also scoped to the categories you scraped.
+
+**Resume works under `--wiki` / `--octarine` too.** Those layouts relocate each
+course into `raw/<course>` / `.attachments/<course>` (keeping its internal
+structure), and the resume manifest and `.yt-dlp-archive.txt` travel inside the
+folder with it. On the next run the scraper detects the relocated course and
+**resumes directly into it** (logged as `[NOTE] RESUME … layout`) — skipping
+files already there and downloading only what's new — rather than re-fetching
+everything into a fresh canonical folder. Re-applying `--wiki` / `--octarine` is
+idempotent: the organizer merges any new files into the existing layout and
+regenerates the index, so `--all --wiki` is safe to run over and over. `--fresh`
+wipes the course everywhere (canonical **and** any reorganized copy) for a clean
+slate.
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 
@@ -422,6 +489,28 @@ Some course materials are **LTI external-tool launches** rather than direct file
   - {NN - Material Name.pdf / .xlsx / …}
   - {NN - Website Name (LINK).url}
 - HOMEPAGE.pdf
+
+## Development
+
+### Tests
+
+The test suite uses Node's built-in test runner (no extra dependencies) and runs
+entirely offline — the resume/download tests spin up a throwaway local HTTP
+server rather than touching Canvas or the network. Run them with:
+
+```
+npm test
+```
+
+`node --test` auto-discovers everything under `test/` (`test/*.test.js`), so new
+test files are picked up automatically. Puppeteer's Chromium isn't needed for
+the tests; if you're only running them you can skip that download with
+`PUPPETEER_SKIP_DOWNLOAD=true npm ci`.
+
+The same suite runs in **GitHub Actions**: the `test` job in
+`.github/workflows/build.yml` runs `npm test` on every push to `main` **and on
+every pull request**, and the standalone executables are only built/released
+once those tests pass (on `main`, not on PRs).
 
 ## Video Tutorial
 

@@ -8,6 +8,7 @@ import { Browser, Page } from "puppeteer";
 import { Readable } from "stream";
 
 import report from "./report.js";
+import manifest from "./manifest.js";
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -143,6 +144,22 @@ const exported = {
    * @returns {Promise<boolean>} whether or not the file was downloaded successfully
    */
   async downloadFile(url, cookies, dir, backupName) {
+    // Mark this asset referenced this run (whether it downloads, skips, or
+    // fails) so a still-listed but now-locked item isn't later mistaken for one
+    // whose source was removed from the course.
+    manifest.markSeen(url);
+    // Resume: if a complete copy is already on disk (per the course manifest),
+    // skip the fetch entirely. --force bypasses this. Dry-run ignores the
+    // manifest — it probes accessibility rather than trusting prior state.
+    if (!this.dryRun) {
+      const existing = manifest.completePath(url);
+      if (existing) {
+        report.record(existing, url);
+        this.print("NOTE", "SKIP", `already downloaded ${path.basename(existing)}`, 1);
+        return true;
+      }
+    }
+
     const response = await fetch(url, {
       method: "GET",
       credentials: "include",
@@ -202,8 +219,15 @@ const exported = {
 
     const filePath = path.join(dir, filename);
     await this.streamToFile(response, filePath, filename);
-    if (ok) report.record(filePath, url);
-    else report.recordFailure(url, "no file returned (missing content-disposition)");
+    if (ok) {
+      report.record(filePath, url);
+      manifest.record(url, filePath, {
+        bytes: Number(response.headers.get("content-length")) || 0,
+        etag: response.headers.get("etag") || "",
+      });
+    } else {
+      report.recordFailure(url, "no file returned (missing content-disposition)");
+    }
     return ok;
   },
 
@@ -677,6 +701,18 @@ const exported = {
    * @returns {Promise<boolean>} whether the file was downloaded successfully
    */
   async downloadExternalFile(url, dir, backupName) {
+    // Mark referenced this run (see downloadFile), then resume-skip if a
+    // complete copy is already on disk.
+    manifest.markSeen(url);
+    if (!this.dryRun) {
+      const existing = manifest.completePath(url);
+      if (existing) {
+        report.record(existing, url);
+        this.print("NOTE", "SKIP", `already downloaded ${path.basename(existing)}`, 1);
+        return true;
+      }
+    }
+
     let response;
     try {
       response = await fetch(url, { method: "GET", redirect: "follow" });
@@ -736,6 +772,10 @@ const exported = {
     const filePath = path.join(dir, filename);
     await this.streamToFile(response, filePath, filename);
     report.record(filePath, url);
+    manifest.record(url, filePath, {
+      bytes: Number(response.headers.get("content-length")) || 0,
+      etag: response.headers.get("etag") || "",
+    });
     return true;
   },
 
@@ -985,6 +1025,19 @@ const exported = {
 
     // For a single video, don't expand any playlist the URL happens to belong to.
     if (kind === "single") args.push("--no-playlist");
+
+    // Resume: record every downloaded video/playlist entry in a per-course
+    // archive and skip anything already in it on a re-run, and never overwrite a
+    // file already on disk. A --fresh run wipes the course folder (archive and
+    // all), so it re-downloads. Kept at the course root (falling back to the
+    // download dir) so one archive dedupes a video linked from several places.
+    const archiveDir =
+      manifest.enabled && manifest.courseDir ? manifest.courseDir : absDir;
+    args.push(
+      "--no-overwrites",
+      "--download-archive",
+      path.join(path.resolve(archiveDir), ".yt-dlp-archive.txt")
+    );
 
     const cookieFile = this.getYtDlpCookieFile(cookies);
     if (cookieFile) args.push("--cookies", cookieFile);
@@ -1655,6 +1708,18 @@ const exported = {
     this.dryRun = !!on;
   },
 
+  // When true (a --fresh run), each course folder is wiped and rebuilt from
+  // scratch before scraping. The default (false) reconciles in place: a re-run
+  // keeps whatever is already on disk and only re-downloads what's missing or
+  // incomplete, so it's safe to run the scrape repeatedly. Set/reset by
+  // runScrape (like dryRun).
+  fresh: false,
+
+  /** Turns fresh (wipe-and-rebuild) mode on or off. */
+  setFresh(on) {
+    this.fresh = !!on;
+  },
+
   /**
    * Captures a page as a PDF, or — in dry-run — probes the page's accessibility
    * and records it instead of writing anything. Every scraper that would save a
@@ -1715,9 +1780,23 @@ const exported = {
     let received = 0;
     let lastEmit = 0;
     this.emitProgress({ scope, phase: "start", name, received: 0, total });
+    // Write to a sibling ".part" file and rename into place only once the body
+    // has fully arrived. An interrupted run (dropped connection, Ctrl-C, crash)
+    // then leaves a leftover ".part" — never a truncated file at the real path
+    // that a resumed run would mistake for a complete download.
+    const tmpPath = filePath + ".part";
     await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(filePath);
-      response.body.on("error", reject);
+      const fileStream = fs.createWriteStream(tmpPath);
+      const fail = (err) => {
+        // Best-effort cleanup so a failed download doesn't strand a ".part".
+        try {
+          fileStream.destroy();
+        } catch (e) {
+          /* ignore */
+        }
+        fs.rm(tmpPath, { force: true }, () => reject(err));
+      };
+      response.body.on("error", fail);
       response.body.on("data", (chunk) => {
         received += chunk.length;
         const now = Date.now();
@@ -1733,10 +1812,12 @@ const exported = {
           });
         }
       });
-      fileStream.on("error", reject);
+      fileStream.on("error", fail);
       fileStream.on("finish", resolve);
       response.body.pipe(fileStream);
     });
+    // Atomic on the same filesystem (tmp is a sibling of the destination).
+    fs.renameSync(tmpPath, filePath);
     this.emitProgress({
       scope,
       phase: "done",
@@ -1798,9 +1879,27 @@ const exported = {
    */
   async writeFile(dir, filename, data) {
     if (this.dryRun) return; // dry-run writes nothing to disk
-    const textStream = Readable.from(data);
-    const fileStream = fs.createWriteStream(path.join(dir, filename));
-    await textStream.pipe(fileStream);
+    const filePath = path.join(dir, filename);
+    // Same ".part"-then-rename discipline as streamToFile: an interrupted write
+    // never leaves a truncated file at the real path for a resumed run to trust.
+    const tmpPath = filePath + ".part";
+    await new Promise((resolve, reject) => {
+      const textStream = Readable.from(data);
+      const fileStream = fs.createWriteStream(tmpPath);
+      const fail = (err) => {
+        try {
+          fileStream.destroy();
+        } catch (e) {
+          /* ignore */
+        }
+        fs.rm(tmpPath, { force: true }, () => reject(err));
+      };
+      textStream.on("error", fail);
+      fileStream.on("error", fail);
+      fileStream.on("finish", resolve);
+      textStream.pipe(fileStream);
+    });
+    fs.renameSync(tmpPath, filePath);
   },
 
   types: {
@@ -1908,29 +2007,109 @@ const exported = {
     return sections;
   },
 
+  // Folders created (or reused) in THIS run. On a re-run a folder left from a
+  // PREVIOUS run is the same item, so it's reused rather than getting a " (n)"
+  // sibling; only a name genuinely reused within one run is disambiguated.
+  // Reset per course by resetCreatedDirs().
+  _createdDirs: new Set(),
+
+  /** Clears the created-this-run folder set (call once per course). */
+  resetCreatedDirs() {
+    this._createdDirs = new Set();
+  },
+
   /**
-   * Creates a directory, avoiding collisions with existing ones. Sanitized
-   * names frequently repeat (e.g. several untitled sections, or two files with
-   * the same name), and a bare mkdirSync throws EEXIST on the second. When the
-   * desired path is taken, appends " (2)", " (3)", ... until a free name is
-   * found. Missing parent directories are created as needed.
+   * Resolves the directory an item should be saved in, reusing an existing
+   * folder instead of duplicating it — so the scrape is safe to re-run.
+   *
+   * Two levels of reuse:
+   *  - Identity (when `identity`, a stable item URL, is given): if the manifest
+   *    recorded a folder for this item, reuse it even if the display name
+   *    changed — renaming the folder in place (and moving its manifest asset
+   *    paths with it) when it did. This is what keeps an assignment whose grade
+   *    suffix updated mid-term from spawning a second folder.
+   *  - Name: a folder left from a previous run (same name, not created in THIS
+   *    run) is the same item and is reused. A name reused within one run (two
+   *    genuinely distinct items that sanitize alike) still gets " (2)", " (3)".
+   *
+   * Missing parent directories are created as needed.
    * @param {string} desiredPath the directory path to create
-   * @returns {string} the path actually created (may carry a " (n)" suffix)
+   * @param {string} [identity] a stable item URL used to find a renamed folder
+   * @returns {string} the path actually used (may carry a " (n)" suffix)
    */
-  mkUniqueDir(desiredPath) {
+  mkUniqueDir(desiredPath, identity = null) {
     // Dry-run writes nothing, so don't create (or uniquify) any directories;
     // just hand back the path callers use to build download destinations.
     if (this.dryRun) return desiredPath;
     const parent = path.dirname(desiredPath);
     const base = path.basename(desiredPath);
     fs.mkdirSync(parent, { recursive: true });
-    let candidate = desiredPath;
+
+    // Identity-based reuse (survives a rename of the display name).
+    if (identity != null && manifest.enabled) {
+      const recordedRel = manifest.lookupDir(identity);
+      if (recordedRel) {
+        const recordedAbs = path.join(manifest.courseDir, recordedRel);
+        if (fs.existsSync(recordedAbs)) {
+          if (recordedAbs === desiredPath) {
+            this._createdDirs.add(recordedAbs);
+            return recordedAbs;
+          }
+          // The display name changed — rename the existing folder to the new
+          // name and move its manifest asset paths with it, so a resumed run
+          // still finds the files inside instead of re-downloading them.
+          const target = this._freeDirName(parent, base, {
+            avoidDisk: true,
+            skip: recordedAbs,
+          });
+          try {
+            fs.renameSync(recordedAbs, target);
+            manifest.relocate(
+              path.relative(manifest.courseDir, recordedAbs),
+              path.relative(manifest.courseDir, target)
+            );
+            manifest.recordDir(identity, target);
+            this._createdDirs.add(target);
+            return target;
+          } catch (e) {
+            // Rename failed — reuse in place rather than duplicating.
+            this._createdDirs.add(recordedAbs);
+            return recordedAbs;
+          }
+        }
+      }
+    }
+
+    // Name-based reuse: only step past a name we already used THIS run.
+    const candidate = this._freeDirName(parent, base);
+    if (!fs.existsSync(candidate)) fs.mkdirSync(candidate);
+    this._createdDirs.add(candidate);
+    if (identity != null && manifest.enabled) manifest.recordDir(identity, candidate);
+    return candidate;
+  },
+
+  /**
+   * The first "<base>", "<base> (2)", ... under `parent` not already claimed.
+   * A name used earlier in THIS run always counts as taken. A folder that
+   * merely exists on disk (from a previous run) is a collision only when
+   * `avoidDisk` is set (choosing a fresh rename target); otherwise it's meant
+   * to be reused, so it's not stepped past. `skip` is an absolute path treated
+   * as free even if it exists (the folder being renamed away from).
+   * @param {string} parent parent directory
+   * @param {string} base desired folder basename
+   * @param {object} [opts]
+   * @param {boolean} [opts.avoidDisk] also skip names that already exist on disk
+   * @param {string} [opts.skip] a path to treat as free even if it exists
+   */
+  _freeDirName(parent, base, { avoidDisk = false, skip = null } = {}) {
+    let candidate = path.join(parent, base);
     let n = 2;
-    while (fs.existsSync(candidate)) {
+    const taken = (c) =>
+      c !== skip && (this._createdDirs.has(c) || (avoidDisk && fs.existsSync(c)));
+    while (taken(candidate)) {
       candidate = path.join(parent, `${base} (${n})`);
       n++;
     }
-    fs.mkdirSync(candidate);
     return candidate;
   },
 

@@ -1,10 +1,12 @@
 import fs from "fs";
 import http from "http";
+import path from "path";
 
 import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
 import scrapers from "../scrapers/index.js";
 import report from "../scrapers/report.js";
+import manifest from "../scrapers/manifest.js";
 import wiki from "../scrapers/wiki.js";
 import octarine from "../scrapers/octarine.js";
 
@@ -162,6 +164,16 @@ const PHASES = [
   ["s", "Study.Net", scrapers.scrapeStudyNet],
 ];
 
+// Top-level output folder each phase writes into — used to scope manifest
+// reconciliation to only the categories a given run actually scraped.
+const CATEGORY_BY_KEY = {
+  a: "ASSIGNMENTS",
+  m: "MODULES",
+  q: "QUIZZES",
+  v: "VIDEOS",
+  s: "STUDYNET",
+};
+
 /**
  * Builds a self-contained, macOS/Windows-safe folder name for a course.
  *
@@ -187,6 +199,29 @@ function courseFolderName(name, id, used) {
   return folder;
 }
 
+// The subfolders --wiki and --octarine relocate each course into (preserving
+// the course's internal CATEGORY structure). Used to resume into an
+// already-reorganized output instead of re-downloading into the canonical tree.
+const REORG_ROOTS = ["raw", ".attachments"];
+
+/**
+ * If a previous --wiki / --octarine run moved this course out of the canonical
+ * `<output>/<course>` tree into `<output>/raw/<course>` or
+ * `<output>/.attachments/<course>`, returns that location so the scrape resumes
+ * into it (files, manifest, and video archive all travel with the folder).
+ * Returns null when the course is still in the canonical layout.
+ * @param {string} outputDir the main output directory
+ * @param {string} courseFolder the course's folder name
+ * @returns {string|null}
+ */
+export function reorganizedCourseDir(outputDir, courseFolder) {
+  for (const root of REORG_ROOTS) {
+    const loc = path.join(outputDir, root, courseFolder);
+    if (fs.existsSync(loc)) return loc;
+  }
+  return null;
+}
+
 /**
  * Scrapes one course into `courseDir` (homepage PDF + the selected sections).
  */
@@ -200,17 +235,54 @@ async function scrapeCourse(
   onProgress
 ) {
   helpers.print("INFO", "COURSE", `Scraping ${courseUrl}`, 0);
-  // Refresh just this course's own folder so re-scraping a course replaces its
-  // contents without disturbing sibling courses in the main output folder. A
-  // dry-run writes nothing, so it must never wipe or create the folder (that
-  // would destroy the results of a previous real scrape).
+  // Prepare this course's own folder without disturbing sibling courses in the
+  // main output folder. A dry-run writes nothing, so it must never wipe or
+  // create the folder (that would destroy the results of a previous real
+  // scrape).
+  //
+  // Default (resume): keep whatever is already on disk and reconcile in place —
+  // a re-run only re-downloads what's missing or incomplete, so it's safe to
+  // run repeatedly. If a previous --wiki / --octarine run relocated this course,
+  // resume into that same location so the scrape stays consistent with the
+  // reorganized layout (and finds the manifest that travelled with it) instead
+  // of re-downloading into a fresh canonical folder. --fresh wipes the course
+  // everywhere — canonical and any reorganized copy — for a clean slate.
+  const outputDir = path.dirname(courseDir);
+  const courseFolder = path.basename(courseDir);
   if (!helpers.dryRun) {
-    if (fs.existsSync(courseDir)) fs.rmSync(courseDir, { recursive: true, force: true });
+    if (helpers.fresh) {
+      for (const p of [
+        courseDir,
+        ...REORG_ROOTS.map((root) => path.join(outputDir, root, courseFolder)),
+      ]) {
+        if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+      }
+    } else {
+      const relocated = reorganizedCourseDir(outputDir, courseFolder);
+      if (relocated) {
+        helpers.print(
+          "NOTE",
+          "RESUME",
+          `Resuming into existing ${path.relative(outputDir, relocated)} layout`,
+          0
+        );
+        courseDir = relocated;
+      }
+    }
     fs.mkdirSync(courseDir, { recursive: true });
   }
 
   // Attribute every asset downloaded below to this course in the report.
   report.setCourse(courseName, courseUrl);
+
+  // Load this course's download manifest so downloaders can skip files already
+  // on disk and re-fetch only what's missing/incomplete. Skipped in a dry-run
+  // (which writes nothing and probes accessibility instead). A --fresh run just
+  // wiped the folder, so the manifest starts empty and everything re-downloads.
+  if (!helpers.dryRun) manifest.load(courseDir, courseUrl);
+  // Fresh per-course folder-reuse tracking so item folders from a previous run
+  // are reused in place rather than duplicated with a " (n)" suffix.
+  helpers.resetCreatedDirs();
 
   const page = await helpers.newPage(browser, cookies, courseUrl);
   if (page.status !== 200) {
@@ -241,6 +313,37 @@ async function scrapeCourse(
     onProgress({ type: "phase", label, courseName });
     await fn(browser, cookies, courseUrl, courseDir);
   }
+
+  // Reconcile: assets no longer referenced by any scraped category are gone
+  // from the course. By default they're just flagged (files kept); --prune
+  // deletes them. Scoped to the categories this run scraped so a partial run
+  // (e.g. only -a) never touches another category's files. Then persist the
+  // manifest so the next run can resume, and reset so state never leaks into
+  // the next course.
+  if (!helpers.dryRun) {
+    const categories = new Set();
+    for (const [key] of PHASES) {
+      if (toScrape[key] && CATEGORY_BY_KEY[key]) categories.add(CATEGORY_BY_KEY[key]);
+    }
+    const { removed, pruned } = manifest.reconcile(categories);
+    if (pruned) {
+      helpers.print(
+        "NOTE",
+        "PRUNE",
+        `Removed ${pruned} local file(s) whose source is no longer in the course`,
+        0
+      );
+    } else if (removed) {
+      helpers.print(
+        "NOTE",
+        "RESUME",
+        `${removed} asset(s) no longer referenced in the course (kept on disk; pass --prune to remove)`,
+        0
+      );
+    }
+    manifest.save();
+  }
+  manifest.reset();
 
   helpers.print("INFO", "COURSE", `Finished ${courseUrl}`, 0);
 }
@@ -383,6 +486,21 @@ export async function runScrape(url, options, hooks = {}) {
   // probe results are collected, and route byte-writing helpers to record-only.
   const prevDryRun = helpers.dryRun;
   helpers.setDryRun(!!options.dryRun);
+
+  // --fresh wipes and rebuilds each course folder; the default reconciles in
+  // place (a safe, repeatable re-run). Set/reset like dryRun.
+  const prevFresh = helpers.fresh;
+  helpers.setFresh(!!options.fresh);
+
+  // --force re-downloads assets the manifest already marks complete (in case an
+  // on-disk file is suspected corrupt); the default trusts the manifest.
+  const prevForce = manifest.force;
+  manifest.setForce(!!options.force);
+
+  // --prune deletes local files whose source is gone from the course; the
+  // default keeps them and only flags the manifest entry.
+  const prevPrune = manifest.prune;
+  manifest.setPrune(!!options.prune);
 
   // Reset per-run error and diagnostic tracking so the reports reflect only
   // this run.
@@ -589,6 +707,9 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setPrinter(prevPrinter);
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);
+    helpers.setFresh(prevFresh);
+    manifest.setForce(prevForce);
+    manifest.setPrune(prevPrune);
   }
 }
 

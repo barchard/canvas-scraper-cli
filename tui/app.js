@@ -677,6 +677,9 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     cfg.octarine = values.includes("octarine");
     cfg.t = values.includes("t");
     cfg.dryRun = values.includes("dryRun");
+    cfg.fresh = values.includes("fresh");
+    cfg.force = values.includes("force");
+    cfg.prune = values.includes("prune");
     setStep("scraping");
   };
 
@@ -774,6 +777,9 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         { label: "Organize as an LLM Wiki (--wiki)", value: "wiki" },
         { label: "Organize as an Octarine workspace (--octarine)", value: "octarine" },
         { label: "Transcribe downloaded videos (-t)", value: "t" },
+        { label: "Fresh run — wipe each course folder and re-download from scratch (--fresh)", value: "fresh" },
+        { label: "Force — re-download files even if already complete (--force)", value: "force" },
+        { label: "Prune — delete local files whose source is gone from the course (--prune)", value: "prune" },
       ],
       onSubmit: onExtras,
     });
