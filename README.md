@@ -490,6 +490,28 @@ Some course materials are **LTI external-tool launches** rather than direct file
   - {NN - Website Name (LINK).url}
 - HOMEPAGE.pdf
 
+## Development
+
+### Tests
+
+The test suite uses Node's built-in test runner (no extra dependencies) and runs
+entirely offline — the resume/download tests spin up a throwaway local HTTP
+server rather than touching Canvas or the network. Run them with:
+
+```
+npm test
+```
+
+`node --test` auto-discovers everything under `test/` (`test/*.test.js`), so new
+test files are picked up automatically. Puppeteer's Chromium isn't needed for
+the tests; if you're only running them you can skip that download with
+`PUPPETEER_SKIP_DOWNLOAD=true npm ci`.
+
+The same suite runs in **GitHub Actions**: the `test` job in
+`.github/workflows/build.yml` runs `npm test` on every push to `main` **and on
+every pull request**, and the standalone executables are only built/released
+once those tests pass (on `main`, not on PRs).
+
 ## Video Tutorial
 
 Watch the video below for a quick guide on how to download and use the CLI!
