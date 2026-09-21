@@ -1066,6 +1066,15 @@ const exported = {
       ? new Set(this.listFilesRecursive(absDir))
       : null;
 
+    // Snapshot the media already present so we can tell, after a clean (code 0)
+    // exit, whether yt-dlp actually produced any video. A login-gated provider
+    // (e.g. Panopto without valid cookies) can resolve an empty playlist and
+    // exit 0 having downloaded nothing — which we must report, not swallow.
+    const VIDEO_MEDIA_RE = /\.(mp4|m4a|mkv|webm|mp3|wav)$/i;
+    const mediaBefore = new Set(
+      this.listFilesRecursive(absDir).filter((f) => VIDEO_MEDIA_RE.test(f))
+    );
+
     const num = (s) => {
       const n = Number(s);
       return Number.isFinite(n) ? n : null;
@@ -1083,6 +1092,9 @@ const exported = {
       let stderr = "";
       let outBuf = "";
       let currentTitle = "";
+      // Set when yt-dlp reports skipping an item it already has in the download
+      // archive — a clean "nothing new" on a re-run, not a failure.
+      let archiveSkipped = false;
 
       // Interleaved transcription: as each media file finishes downloading, queue
       // it for transcription (running sequentially in the background) so it
@@ -1157,6 +1169,12 @@ const exported = {
         while ((nl = outBuf.indexOf("\n")) >= 0) {
           const line = outBuf.slice(0, nl).replace(/\r$/, "");
           outBuf = outBuf.slice(nl + 1);
+          if (
+            line.includes("has already been recorded in the archive") ||
+            line.includes("has already been downloaded")
+          ) {
+            archiveSkipped = true;
+          }
           handleLine(line);
         }
       });
@@ -1197,21 +1215,63 @@ const exported = {
           sweep();
           await transcribeChain;
         }
-        if (code === 0) {
-          report.recordNewFiles(absDir, before, url);
-          return resolve(true);
-        }
+        if (code === 0) report.recordNewFiles(absDir, before, url);
+        const newMediaCount =
+          code === 0
+            ? this.listFilesRecursive(absDir).filter(
+                (f) => VIDEO_MEDIA_RE.test(f) && !mediaBefore.has(f)
+              ).length
+            : 0;
         // ENOENT is handled by the 'error' handler above (no 'close' with 0).
-        this.print(
-          "WARNING",
-          "YT-DLP",
-          `Could not download ${url}`,
-          0,
-          stderr.trim() || `yt-dlp exited with code ${code}`
-        );
+        const outcome = this.videoOutcome({
+          code,
+          newMediaCount,
+          archiveSkipped,
+          stderr,
+          url,
+        });
+        if (outcome.ok) return resolve(true);
+        this.print("WARNING", "YT-DLP", outcome.message, 0, outcome.detail || null);
         resolve(false);
       });
     });
+  },
+
+  /**
+   * Classifies a yt-dlp run so silent failures get surfaced. A non-zero exit is
+   * a failure; a clean exit that produced no media and skipped nothing via the
+   * download archive is treated as a failure too — that's the tell-tale of a
+   * login/cookie wall (e.g. Panopto), which would otherwise look like success.
+   * @param {object} r
+   * @param {number} r.code yt-dlp exit code
+   * @param {number} r.newMediaCount media files produced this run
+   * @param {boolean} r.archiveSkipped yt-dlp skipped an already-archived item
+   * @param {string} r.stderr captured stderr
+   * @param {string} r.url the video/folder URL
+   * @returns {{ok: boolean, empty?: boolean, message?: string, detail?: string}}
+   */
+  videoOutcome({ code, newMediaCount, archiveSkipped, stderr, url }) {
+    const detail = (stderr || "").trim() || null;
+    if (code !== 0) {
+      return {
+        ok: false,
+        message: `Could not download ${url}`,
+        detail: detail || `yt-dlp exited with code ${code}`,
+      };
+    }
+    if (newMediaCount === 0 && !archiveSkipped) {
+      return {
+        ok: false,
+        empty: true,
+        message:
+          `No video was downloaded from ${url}. This usually means the video ` +
+          `host requires a login your cookies don't cover (most often ` +
+          `Panopto). Make sure your cookies file includes a current session ` +
+          `for the video host, then re-run.`,
+        detail,
+      };
+    }
+    return { ok: true };
   },
 
   /** Lists every file under `dir` recursively (absolute paths). */

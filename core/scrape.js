@@ -284,68 +284,87 @@ async function scrapeCourse(
   // are reused in place rather than duplicated with a " (n)" suffix.
   helpers.resetCreatedDirs();
 
-  const page = await helpers.newPage(browser, cookies, courseUrl);
-  if (page.status !== 200) {
-    helpers.print(
-      "ERROR",
-      "HOMEPAGE",
-      `Could not load homepage for ${courseUrl}. Skipping...`,
-      0,
-      http.STATUS_CODES[page.status]
-    );
-    // In a dry-run, an unreachable homepage is itself an inaccessible article.
-    if (helpers.dryRun) {
-      report.recordFailure(courseUrl, helpers.describeHttpFailure(courseUrl, page.status));
+  // Everything from here is wrapped so the manifest is ALWAYS persisted in the
+  // finally — even when the homepage is unreachable (e.g. expired cookies) or a
+  // phase throws. Otherwise an interrupted run would leave no
+  // .scrape-manifest.json and lose the record of what it did download.
+  try {
+    const page = await helpers.newPage(browser, cookies, courseUrl);
+    if (page.status !== 200) {
+      helpers.print(
+        "ERROR",
+        "HOMEPAGE",
+        `Could not load homepage for ${courseUrl}. Skipping...`,
+        0,
+        http.STATUS_CODES[page.status]
+      );
+      // A non-200 homepage is almost always an auth problem — surface it as a
+      // likely cookie issue rather than a bare status line.
+      if (page.status === 401 || page.status === 403) {
+        helpers.print(
+          "WARNING",
+          "COOKIES",
+          `Access to ${courseUrl} was denied (HTTP ${page.status}). Your session cookies are probably missing or expired — re-capture them (e.g. 'node index.js login <domain>' or --login) and try again.`,
+          0
+        );
+      }
+      // In a dry-run, an unreachable homepage is itself an inaccessible article.
+      if (helpers.dryRun) {
+        report.recordFailure(courseUrl, helpers.describeHttpFailure(courseUrl, page.status));
+      }
+      await page.close().catch(() => {});
+      return;
     }
+    // When no name was passed (single-course mode), fall back to the homepage title.
+    if (!courseName) {
+      const title = await page.title().catch(() => "");
+      if (title) report.setCourse(title.trim(), courseUrl);
+    }
+    await helpers.capturePdf(page, { path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
     await page.close().catch(() => {});
-    return;
-  }
-  // When no name was passed (single-course mode), fall back to the homepage title.
-  if (!courseName) {
-    const title = await page.title().catch(() => "");
-    if (title) report.setCourse(title.trim(), courseUrl);
-  }
-  await helpers.capturePdf(page, { path: `${courseDir}/HOMEPAGE.pdf`, format: "Letter" });
-  await page.close().catch(() => {});
 
-  for (const [key, label, fn] of PHASES) {
-    if (!toScrape[key]) continue;
-    onProgress({ type: "phase", label, courseName });
-    await fn(browser, cookies, courseUrl, courseDir);
-  }
-
-  // Reconcile: assets no longer referenced by any scraped category are gone
-  // from the course. By default they're just flagged (files kept); --prune
-  // deletes them. Scoped to the categories this run scraped so a partial run
-  // (e.g. only -a) never touches another category's files. Then persist the
-  // manifest so the next run can resume, and reset so state never leaks into
-  // the next course.
-  if (!helpers.dryRun) {
-    const categories = new Set();
-    for (const [key] of PHASES) {
-      if (toScrape[key] && CATEGORY_BY_KEY[key]) categories.add(CATEGORY_BY_KEY[key]);
+    for (const [key, label, fn] of PHASES) {
+      if (!toScrape[key]) continue;
+      onProgress({ type: "phase", label, courseName });
+      await fn(browser, cookies, courseUrl, courseDir);
     }
-    const { removed, pruned } = manifest.reconcile(categories);
-    if (pruned) {
-      helpers.print(
-        "NOTE",
-        "PRUNE",
-        `Removed ${pruned} local file(s) whose source is no longer in the course`,
-        0
-      );
-    } else if (removed) {
-      helpers.print(
-        "NOTE",
-        "RESUME",
-        `${removed} asset(s) no longer referenced in the course (kept on disk; pass --prune to remove)`,
-        0
-      );
-    }
-    manifest.save();
-  }
-  manifest.reset();
 
-  helpers.print("INFO", "COURSE", `Finished ${courseUrl}`, 0);
+    // Reconcile: assets no longer referenced by any scraped category are gone
+    // from the course. By default they're just flagged (files kept); --prune
+    // deletes them. Scoped to the categories this run scraped so a partial run
+    // (e.g. only -a) never touches another category's files. Only runs on a
+    // clean completion (inside the try, after every phase) so an interrupted
+    // scrape never mistakes un-scraped content for removed content.
+    if (!helpers.dryRun) {
+      const categories = new Set();
+      for (const [key] of PHASES) {
+        if (toScrape[key] && CATEGORY_BY_KEY[key]) categories.add(CATEGORY_BY_KEY[key]);
+      }
+      const { removed, pruned } = manifest.reconcile(categories);
+      if (pruned) {
+        helpers.print(
+          "NOTE",
+          "PRUNE",
+          `Removed ${pruned} local file(s) whose source is no longer in the course`,
+          0
+        );
+      } else if (removed) {
+        helpers.print(
+          "NOTE",
+          "RESUME",
+          `${removed} asset(s) no longer referenced in the course (kept on disk; pass --prune to remove)`,
+          0
+        );
+      }
+    }
+
+    helpers.print("INFO", "COURSE", `Finished ${courseUrl}`, 0);
+  } finally {
+    // Persist progress even on early return / error, then clear per-course
+    // state so it never leaks into the next course.
+    if (!helpers.dryRun) manifest.save();
+    manifest.reset();
+  }
 }
 
 /** Writes the report CSVs (if --report). Errors are logged, not thrown. */

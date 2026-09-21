@@ -136,6 +136,20 @@ test("downloadFile skips the network entirely when the manifest says complete", 
   manifest.reset();
 });
 
+test("save writes the manifest file even when nothing was downloaded", () => {
+  const dir = tmpDir();
+  manifest.reset();
+  manifest.load(dir, "https://x.edu/courses/1");
+  // No record() calls — mirrors a run that only captured PDFs or failed early.
+  manifest.save();
+  // scrapeCourse's finally always calls save(), so the file must exist so a
+  // resumed run has something to load (this is the bug where an early return on
+  // an unreachable homepage left no .scrape-manifest.json).
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST_FILE)));
+  assert.equal(onDisk.version, 1);
+  assert.deepEqual(onDisk.assets, {});
+});
+
 test("a disabled manifest (no course loaded) never skips or records", () => {
   manifest.reset(); // enabled = false
   assert.equal(manifest.completePath("https://x.edu/files/1/download"), null);
