@@ -292,6 +292,10 @@ function listFilesRecursive(dir) {
     return out;
   }
   for (const entry of entries) {
+    // Skip dotfiles (e.g. the resume manifest .scrape-manifest.json and the
+    // .yt-dlp-archive.txt) and in-progress .part files — they're bookkeeping,
+    // not course material, and must not be cataloged as sources.
+    if (entry.name.startsWith(".") || entry.name.endsWith(".part")) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...listFilesRecursive(full));
     else if (entry.isFile()) out.push(full);

@@ -159,6 +159,11 @@ run never leaves a truncated file that a later run would trust as complete. A
 leftover `*.part` file means that download was interrupted (it will be re-fetched
 next run).
 
+**Videos** resume too: `yt-dlp` downloads are recorded in a per-course
+`.yt-dlp-archive.txt` and skipped on the next run (and a partially-downloaded
+video resumes rather than restarting), so re-running never re-fetches gigabytes
+you already have.
+
 **Content that locks, unlocks, or is archived.** Because courses change as the
 term progresses, a re-run reconciles state rather than assuming it's fixed:
 
@@ -184,11 +189,16 @@ Three escape hatches:
   of just flagging them) — use it to keep the output an exact mirror of the
   current course. Also scoped to the categories you scraped.
 
-> **Note:** resume currently applies to the default output layout. If you
-> reorganize with `--wiki` or `--octarine` (which move files into `raw/` /
-> `.attachments/`), a later resume doesn't yet track them across the move —
-> that integration is planned. Re-running `--wiki`/`--octarine` on an
-> already-organized folder is unaffected.
+> **Note on `--wiki` / `--octarine`:** resume tracks the **default** output
+> layout. The resume manifest and `.yt-dlp-archive.txt` are never cataloged as
+> course sources, and they travel with a course folder when `--wiki` /
+> `--octarine` move it — so nothing is destroyed. But those layouts move files
+> out of the canonical `<course>/CATEGORY/…` tree the scraper writes to, so a
+> later **plain re-scrape won't find the relocated files** and would download
+> them again. Recommended workflow: resume in the default layout until the
+> course is complete, and apply `--wiki` / `--octarine` as a final step (or
+> re-run the organizer, which reindexes in place). Resuming *through* a reorg is
+> a planned enhancement.
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 

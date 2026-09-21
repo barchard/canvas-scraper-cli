@@ -1026,6 +1026,19 @@ const exported = {
     // For a single video, don't expand any playlist the URL happens to belong to.
     if (kind === "single") args.push("--no-playlist");
 
+    // Resume: record every downloaded video/playlist entry in a per-course
+    // archive and skip anything already in it on a re-run, and never overwrite a
+    // file already on disk. A --fresh run wipes the course folder (archive and
+    // all), so it re-downloads. Kept at the course root (falling back to the
+    // download dir) so one archive dedupes a video linked from several places.
+    const archiveDir =
+      manifest.enabled && manifest.courseDir ? manifest.courseDir : absDir;
+    args.push(
+      "--no-overwrites",
+      "--download-archive",
+      path.join(path.resolve(archiveDir), ".yt-dlp-archive.txt")
+    );
+
     const cookieFile = this.getYtDlpCookieFile(cookies);
     if (cookieFile) args.push("--cookies", cookieFile);
 
