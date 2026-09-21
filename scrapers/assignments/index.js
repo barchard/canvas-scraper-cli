@@ -14,9 +14,13 @@ async function scrapeAssignment(
     `STARTING SCRAPING`,
     1
   );
-  // create assignment directory and open page
+  // create assignment directory and open page. The folder name embeds the
+  // grade, which changes mid-term, so key reuse on the (stable) assignment URL:
+  // a re-run renames the existing folder to the new grade instead of making a
+  // second one.
   const ASSIGNMENT_PATH = helpers.mkUniqueDir(
-    `${dir}/ASSIGNMENTS/${sectionName}/${assignment.name} (${assignment.grade})`
+    `${dir}/ASSIGNMENTS/${sectionName}/${assignment.name} (${assignment.grade})`,
+    assignment.url
   );
   const page = await helpers.newPage(browser, cookies, assignment.url);
 

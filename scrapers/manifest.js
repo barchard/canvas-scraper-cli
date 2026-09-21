@@ -67,6 +67,12 @@ const manifest = {
   courseDir: "",
   courseUrl: "",
   assets: {},
+  // Maps a stable item identity (a normalized item URL, e.g. an assignment's)
+  // to the folder it was saved in (relative to courseDir). Lets a re-run find
+  // an item's existing folder even when its display name changed — an
+  // assignment's grade suffix updates mid-term — so it renames rather than
+  // duplicates.
+  dirs: {},
 
   /** Turns force (re-download-even-if-complete) mode on or off. */
   setForce(on) {
@@ -83,6 +89,7 @@ const manifest = {
     this.courseDir = courseDir;
     this.courseUrl = courseUrl || "";
     this.assets = {};
+    this.dirs = {};
     this.enabled = true;
     try {
       const raw = JSON.parse(
@@ -90,6 +97,9 @@ const manifest = {
       );
       if (raw && raw.assets && typeof raw.assets === "object") {
         this.assets = raw.assets;
+      }
+      if (raw && raw.dirs && typeof raw.dirs === "object") {
+        this.dirs = raw.dirs;
       }
     } catch (e) {
       // No manifest yet (or unreadable) — start fresh.
@@ -106,6 +116,7 @@ const manifest = {
     this.courseDir = "";
     this.courseUrl = "";
     this.assets = {};
+    this.dirs = {};
   },
 
   /** The manifest key for a URL (normalized). */
@@ -176,6 +187,46 @@ const manifest = {
     if (entry) entry.last_seen = new Date().toISOString();
   },
 
+  /**
+   * The folder recorded for an item identity (relative to courseDir), or
+   * undefined. `identity` is a stable item URL (an assignment/module/quiz link).
+   */
+  lookupDir(identity) {
+    if (!this.enabled || !identity) return undefined;
+    return this.dirs[this.key(identity)];
+  },
+
+  /** Records the folder an item was saved in, keyed by its stable identity. */
+  recordDir(identity, absDir) {
+    if (!this.enabled || !identity) return;
+    this.dirs[this.key(identity)] = path.relative(this.courseDir, absDir);
+  },
+
+  /**
+   * Rewrites every asset path (and dir registry entry) under `oldRel` to sit
+   * under `newRel` instead — used when a folder is renamed in place (e.g. an
+   * assignment's grade suffix changed) so a resumed run still finds the files
+   * inside rather than re-downloading them. Paths are relative to courseDir.
+   * @param {string} oldRel the folder's previous path (relative to courseDir)
+   * @param {string} newRel its new path (relative to courseDir)
+   */
+  relocate(oldRel, newRel) {
+    if (!this.enabled || !oldRel || oldRel === newRel) return;
+    const oldPrefix = oldRel + path.sep;
+    const remap = (p) => {
+      if (p === oldRel) return newRel;
+      if (p && p.startsWith(oldPrefix)) return newRel + path.sep + p.slice(oldPrefix.length);
+      return p;
+    };
+    for (const k of Object.keys(this.assets)) {
+      const e = this.assets[k];
+      if (e && e.path) e.path = remap(e.path);
+    }
+    for (const k of Object.keys(this.dirs)) {
+      this.dirs[k] = remap(this.dirs[k]);
+    }
+  },
+
   /** Persists the manifest to `<courseDir>/.scrape-manifest.json` (atomic). */
   save() {
     if (!this.enabled || !this.courseDir) return;
@@ -184,6 +235,7 @@ const manifest = {
       course_url: this.courseUrl,
       updated: new Date().toISOString(),
       assets: this.assets,
+      dirs: this.dirs,
     };
     const dest = path.join(this.courseDir, MANIFEST_FILE);
     const tmp = dest + ".part";

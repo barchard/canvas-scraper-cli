@@ -225,6 +225,9 @@ async function scrapeCourse(
   // (which writes nothing and probes accessibility instead). A --fresh run just
   // wiped the folder, so the manifest starts empty and everything re-downloads.
   if (!helpers.dryRun) manifest.load(courseDir, courseUrl);
+  // Fresh per-course folder-reuse tracking so item folders from a previous run
+  // are reused in place rather than duplicated with a " (n)" suffix.
+  helpers.resetCreatedDirs();
 
   const page = await helpers.newPage(browser, cookies, courseUrl);
   if (page.status !== 200) {

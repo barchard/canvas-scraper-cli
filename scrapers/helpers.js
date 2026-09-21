@@ -1990,29 +1990,109 @@ const exported = {
     return sections;
   },
 
+  // Folders created (or reused) in THIS run. On a re-run a folder left from a
+  // PREVIOUS run is the same item, so it's reused rather than getting a " (n)"
+  // sibling; only a name genuinely reused within one run is disambiguated.
+  // Reset per course by resetCreatedDirs().
+  _createdDirs: new Set(),
+
+  /** Clears the created-this-run folder set (call once per course). */
+  resetCreatedDirs() {
+    this._createdDirs = new Set();
+  },
+
   /**
-   * Creates a directory, avoiding collisions with existing ones. Sanitized
-   * names frequently repeat (e.g. several untitled sections, or two files with
-   * the same name), and a bare mkdirSync throws EEXIST on the second. When the
-   * desired path is taken, appends " (2)", " (3)", ... until a free name is
-   * found. Missing parent directories are created as needed.
+   * Resolves the directory an item should be saved in, reusing an existing
+   * folder instead of duplicating it — so the scrape is safe to re-run.
+   *
+   * Two levels of reuse:
+   *  - Identity (when `identity`, a stable item URL, is given): if the manifest
+   *    recorded a folder for this item, reuse it even if the display name
+   *    changed — renaming the folder in place (and moving its manifest asset
+   *    paths with it) when it did. This is what keeps an assignment whose grade
+   *    suffix updated mid-term from spawning a second folder.
+   *  - Name: a folder left from a previous run (same name, not created in THIS
+   *    run) is the same item and is reused. A name reused within one run (two
+   *    genuinely distinct items that sanitize alike) still gets " (2)", " (3)".
+   *
+   * Missing parent directories are created as needed.
    * @param {string} desiredPath the directory path to create
-   * @returns {string} the path actually created (may carry a " (n)" suffix)
+   * @param {string} [identity] a stable item URL used to find a renamed folder
+   * @returns {string} the path actually used (may carry a " (n)" suffix)
    */
-  mkUniqueDir(desiredPath) {
+  mkUniqueDir(desiredPath, identity = null) {
     // Dry-run writes nothing, so don't create (or uniquify) any directories;
     // just hand back the path callers use to build download destinations.
     if (this.dryRun) return desiredPath;
     const parent = path.dirname(desiredPath);
     const base = path.basename(desiredPath);
     fs.mkdirSync(parent, { recursive: true });
-    let candidate = desiredPath;
+
+    // Identity-based reuse (survives a rename of the display name).
+    if (identity != null && manifest.enabled) {
+      const recordedRel = manifest.lookupDir(identity);
+      if (recordedRel) {
+        const recordedAbs = path.join(manifest.courseDir, recordedRel);
+        if (fs.existsSync(recordedAbs)) {
+          if (recordedAbs === desiredPath) {
+            this._createdDirs.add(recordedAbs);
+            return recordedAbs;
+          }
+          // The display name changed — rename the existing folder to the new
+          // name and move its manifest asset paths with it, so a resumed run
+          // still finds the files inside instead of re-downloading them.
+          const target = this._freeDirName(parent, base, {
+            avoidDisk: true,
+            skip: recordedAbs,
+          });
+          try {
+            fs.renameSync(recordedAbs, target);
+            manifest.relocate(
+              path.relative(manifest.courseDir, recordedAbs),
+              path.relative(manifest.courseDir, target)
+            );
+            manifest.recordDir(identity, target);
+            this._createdDirs.add(target);
+            return target;
+          } catch (e) {
+            // Rename failed — reuse in place rather than duplicating.
+            this._createdDirs.add(recordedAbs);
+            return recordedAbs;
+          }
+        }
+      }
+    }
+
+    // Name-based reuse: only step past a name we already used THIS run.
+    const candidate = this._freeDirName(parent, base);
+    if (!fs.existsSync(candidate)) fs.mkdirSync(candidate);
+    this._createdDirs.add(candidate);
+    if (identity != null && manifest.enabled) manifest.recordDir(identity, candidate);
+    return candidate;
+  },
+
+  /**
+   * The first "<base>", "<base> (2)", ... under `parent` not already claimed.
+   * A name used earlier in THIS run always counts as taken. A folder that
+   * merely exists on disk (from a previous run) is a collision only when
+   * `avoidDisk` is set (choosing a fresh rename target); otherwise it's meant
+   * to be reused, so it's not stepped past. `skip` is an absolute path treated
+   * as free even if it exists (the folder being renamed away from).
+   * @param {string} parent parent directory
+   * @param {string} base desired folder basename
+   * @param {object} [opts]
+   * @param {boolean} [opts.avoidDisk] also skip names that already exist on disk
+   * @param {string} [opts.skip] a path to treat as free even if it exists
+   */
+  _freeDirName(parent, base, { avoidDisk = false, skip = null } = {}) {
+    let candidate = path.join(parent, base);
     let n = 2;
-    while (fs.existsSync(candidate)) {
+    const taken = (c) =>
+      c !== skip && (this._createdDirs.has(c) || (avoidDisk && fs.existsSync(c)));
+    while (taken(candidate)) {
       candidate = path.join(parent, `${base} (${n})`);
       n++;
     }
-    fs.mkdirSync(candidate);
     return candidate;
   },
 
