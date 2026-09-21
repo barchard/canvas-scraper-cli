@@ -200,12 +200,19 @@ async function scrapeCourse(
   onProgress
 ) {
   helpers.print("INFO", "COURSE", `Scraping ${courseUrl}`, 0);
-  // Refresh just this course's own folder so re-scraping a course replaces its
-  // contents without disturbing sibling courses in the main output folder. A
-  // dry-run writes nothing, so it must never wipe or create the folder (that
-  // would destroy the results of a previous real scrape).
+  // Prepare this course's own folder without disturbing sibling courses in the
+  // main output folder. A dry-run writes nothing, so it must never wipe or
+  // create the folder (that would destroy the results of a previous real
+  // scrape).
+  //
+  // Default (resume): keep whatever is already on disk and reconcile in place —
+  // a re-run only re-downloads what's missing or incomplete, so it's safe to
+  // run repeatedly. --fresh restores the old wipe-and-rebuild behavior for a
+  // clean slate.
   if (!helpers.dryRun) {
-    if (fs.existsSync(courseDir)) fs.rmSync(courseDir, { recursive: true, force: true });
+    if (helpers.fresh && fs.existsSync(courseDir)) {
+      fs.rmSync(courseDir, { recursive: true, force: true });
+    }
     fs.mkdirSync(courseDir, { recursive: true });
   }
 
@@ -383,6 +390,11 @@ export async function runScrape(url, options, hooks = {}) {
   // probe results are collected, and route byte-writing helpers to record-only.
   const prevDryRun = helpers.dryRun;
   helpers.setDryRun(!!options.dryRun);
+
+  // --fresh wipes and rebuilds each course folder; the default reconciles in
+  // place (a safe, repeatable re-run). Set/reset like dryRun.
+  const prevFresh = helpers.fresh;
+  helpers.setFresh(!!options.fresh);
 
   // Reset per-run error and diagnostic tracking so the reports reflect only
   // this run.
@@ -589,6 +601,7 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setPrinter(prevPrinter);
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);
+    helpers.setFresh(prevFresh);
   }
 }
 

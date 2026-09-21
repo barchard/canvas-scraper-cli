@@ -1655,6 +1655,18 @@ const exported = {
     this.dryRun = !!on;
   },
 
+  // When true (a --fresh run), each course folder is wiped and rebuilt from
+  // scratch before scraping. The default (false) reconciles in place: a re-run
+  // keeps whatever is already on disk and only re-downloads what's missing or
+  // incomplete, so it's safe to run the scrape repeatedly. Set/reset by
+  // runScrape (like dryRun).
+  fresh: false,
+
+  /** Turns fresh (wipe-and-rebuild) mode on or off. */
+  setFresh(on) {
+    this.fresh = !!on;
+  },
+
   /**
    * Captures a page as a PDF, or — in dry-run — probes the page's accessibility
    * and records it instead of writing anything. Every scraper that would save a
@@ -1715,9 +1727,23 @@ const exported = {
     let received = 0;
     let lastEmit = 0;
     this.emitProgress({ scope, phase: "start", name, received: 0, total });
+    // Write to a sibling ".part" file and rename into place only once the body
+    // has fully arrived. An interrupted run (dropped connection, Ctrl-C, crash)
+    // then leaves a leftover ".part" — never a truncated file at the real path
+    // that a resumed run would mistake for a complete download.
+    const tmpPath = filePath + ".part";
     await new Promise((resolve, reject) => {
-      const fileStream = fs.createWriteStream(filePath);
-      response.body.on("error", reject);
+      const fileStream = fs.createWriteStream(tmpPath);
+      const fail = (err) => {
+        // Best-effort cleanup so a failed download doesn't strand a ".part".
+        try {
+          fileStream.destroy();
+        } catch (e) {
+          /* ignore */
+        }
+        fs.rm(tmpPath, { force: true }, () => reject(err));
+      };
+      response.body.on("error", fail);
       response.body.on("data", (chunk) => {
         received += chunk.length;
         const now = Date.now();
@@ -1733,10 +1759,12 @@ const exported = {
           });
         }
       });
-      fileStream.on("error", reject);
+      fileStream.on("error", fail);
       fileStream.on("finish", resolve);
       response.body.pipe(fileStream);
     });
+    // Atomic on the same filesystem (tmp is a sibling of the destination).
+    fs.renameSync(tmpPath, filePath);
     this.emitProgress({
       scope,
       phase: "done",
@@ -1798,9 +1826,27 @@ const exported = {
    */
   async writeFile(dir, filename, data) {
     if (this.dryRun) return; // dry-run writes nothing to disk
-    const textStream = Readable.from(data);
-    const fileStream = fs.createWriteStream(path.join(dir, filename));
-    await textStream.pipe(fileStream);
+    const filePath = path.join(dir, filename);
+    // Same ".part"-then-rename discipline as streamToFile: an interrupted write
+    // never leaves a truncated file at the real path for a resumed run to trust.
+    const tmpPath = filePath + ".part";
+    await new Promise((resolve, reject) => {
+      const textStream = Readable.from(data);
+      const fileStream = fs.createWriteStream(tmpPath);
+      const fail = (err) => {
+        try {
+          fileStream.destroy();
+        } catch (e) {
+          /* ignore */
+        }
+        fs.rm(tmpPath, { force: true }, () => reject(err));
+      };
+      textStream.on("error", fail);
+      fileStream.on("error", fail);
+      fileStream.on("finish", resolve);
+      textStream.pipe(fileStream);
+    });
+    fs.renameSync(tmpPath, filePath);
   },
 
   types: {

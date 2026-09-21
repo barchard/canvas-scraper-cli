@@ -121,6 +121,7 @@ Options:
   --report                 write a report.csv listing every downloaded asset (default: false)
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
+  --fresh                  wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk (default: false)
   --all                    scrape all content types (-a -m -q -v -s)
   --courses <ids>          comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses
   --tui                    run with the interactive terminal UI (Ink)
@@ -132,7 +133,22 @@ Commands:
   login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started")
 ```
 
-Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, and `--octarine` are separate modifiers — they are **not** included in "scrape all".)
+Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, `--octarine`, and `--fresh` are separate modifiers — they are **not** included in "scrape all".)
+
+### Fresh vs. in-place runs (`--fresh`)
+
+By default the scraper no longer wipes a course's folder before scraping it, so
+an interrupted run (an expired cookie, a dropped connection, a `Ctrl-C`) never
+destroys the work a previous run already downloaded.
+
+Downloads are also **interruption-safe**: every file is written to a temporary
+`.part` file and renamed into place only once it has fully arrived, so an
+aborted run never leaves a truncated file at the real path. A leftover `*.part`
+file means that download was interrupted.
+
+Add `--fresh` to start clean: it deletes each course's folder and re-downloads
+everything from scratch (sibling courses in the output directory are left
+untouched — only the courses in this run are wiped).
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 

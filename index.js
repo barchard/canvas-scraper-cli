@@ -135,6 +135,16 @@ const flagDef = [
     description:
       "organize output into an Octarine workspace (.attachments/, course notes, Index.md)",
   },
+  {
+    type: "confirm",
+    name: "fresh",
+    message:
+      "Do you want a fresh run (wipe each course folder and re-download everything)?",
+    default: false,
+    flags: "--fresh",
+    description:
+      "wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk",
+  },
 ];
 
 const program = new Command();
