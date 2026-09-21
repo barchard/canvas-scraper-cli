@@ -122,6 +122,8 @@ Options:
   --wiki                    organize output into the Karpathy LLM Wiki layout (raw/, wiki/, index.md) (default: false)
   --octarine                organize output into an Octarine workspace (.attachments/, course notes, Index.md) (default: false)
   --all                    scrape all content types (-a -m -q -v -s)
+  --retries <n>            auto-retry each failed download up to n times with exponential backoff, 0 disables (default: 3)
+  --retry-delay <seconds>  base backoff between download retries in seconds, grows exponentially, capped at 60s (default: 2)
   --courses <ids>          comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses
   --tui                    run with the interactive terminal UI (Ink)
   --login                  open a browser to log in and capture cookies before scraping
@@ -164,6 +166,19 @@ Add `--dry-run` to find out **which articles and artifacts are inaccessible befo
 | `course_name` / `course_url` | the course it belongs to |
 
 Inaccessible items are listed first (and echoed to the console) so you can see at a glance what a real run would miss. Combine it with the content flags to narrow the probe (e.g. `--all --dry-run`, or `-v --dry-run` to only check videos); on its own with a URL it probes everything. `--dry-run` turns the recorder on itself, so you don't also need `--report`.
+
+### Automatic retries (`--retries`)
+
+Downloads sometimes fail for reasons that clear up on their own — a YouTube/Panopto fetch that trips the "confirm you're not a bot" wall, a rate-limited (`HTTP 429`) request, a dropped connection, or a `5xx` server hiccup. Rather than leaving those in the skipped report, the scraper **retries each failed download automatically with exponential backoff**:
+
+- `--retries <n>` sets how many extra attempts a failed download gets (default **3**; `--retries 0` disables retries entirely).
+- `--retry-delay <seconds>` sets the base backoff (default **2s**). Each retry waits roughly `2^n` times the base — ~2s, 4s, 8s — with random jitter, capped at 60s, so a batch of simultaneous failures doesn't retry in lockstep.
+
+Retries only apply to **transient** failures. Permanent ones are given up on immediately (no pointless waiting): an instructor-locked or missing file (`HTTP 401/403/404`), a private/removed/unavailable video, an unsupported URL, a paywalled article, or a `200` response that carried no file. Between attempts a `[WARNING] [RETRY]` (or `[YT-DLP]`) line reports the wait so a long run isn't silent while it backs off; only the *final* failure is written to `report-skipped.csv`.
+
+For videos there are **two layers**: `yt-dlp`'s own `--retries` / `--fragment-retries` (scaled to the same count) recover *within* a download by resuming a dropped fragment mid-file, while the scraper's outer retry restarts the whole `yt-dlp` run if it fails altogether. `--retries 0` disables both layers.
+
+In the [Terminal UI](#terminal-ui---tui), retries are **on by default (3 attempts)** — untick **"Retry failed downloads automatically"** in the *extras* step to turn them off. The count itself is only customizable from the CLI (`--retries`).
 
 ### Asset report (`--report`)
 

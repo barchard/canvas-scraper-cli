@@ -363,6 +363,9 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
           a: false, m: false, q: false, v: false, s: false,
           t: false, report: false, wiki: false, octarine: false,
           dryRun: false,
+          // Retry failed downloads by default (3 attempts). The extras step lets
+          // you turn it off; the CLI (--retries) lets you change the count.
+          retries: 3, retryDelay: 2,
           all: false, tui: false,
           courseIds: null,
           _menu: true,
@@ -677,6 +680,13 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     cfg.octarine = values.includes("octarine");
     cfg.t = values.includes("t");
     cfg.dryRun = values.includes("dryRun");
+    // Retry is on by default (3 attempts); unchecking it disables retries. The
+    // count itself is only customizable from the CLI (--retries).
+    if (values.includes("retry")) {
+      cfg.retries = cfg.retries > 0 ? cfg.retries : 3;
+    } else {
+      cfg.retries = 0;
+    }
     setStep("scraping");
   };
 
@@ -769,6 +779,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     view = h(MultiSelectPrompt, {
       message: "Any extras? (optional)",
       items: [
+        { label: "Retry failed downloads automatically (backoff, 3 attempts)", value: "retry", checked: true },
         { label: "Dry run — find inaccessible articles/artifacts, download nothing (--dry-run)", value: "dryRun" },
         { label: "CSV report of downloaded assets (--report)", value: "report" },
         { label: "Organize as an LLM Wiki (--wiki)", value: "wiki" },

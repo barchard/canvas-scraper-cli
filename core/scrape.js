@@ -384,6 +384,17 @@ export async function runScrape(url, options, hooks = {}) {
   const prevDryRun = helpers.dryRun;
   helpers.setDryRun(!!options.dryRun);
 
+  // Auto-retry transient download failures (a flaky YouTube/Panopto fetch, a
+  // rate-limited Canvas file) with exponential backoff. --retries sets the extra
+  // attempts (default 3; 0 disables) and --retry-delay the base backoff seconds.
+  const prevRetries = helpers.retries;
+  const prevRetryBaseDelay = helpers.retryBaseDelay;
+  const retries = Number.isFinite(options.retries) ? options.retries : 3;
+  const retryDelaySec = Number.isFinite(options.retryDelay)
+    ? options.retryDelay
+    : 2;
+  helpers.setRetryConfig({ retries, baseDelay: retryDelaySec * 1000 });
+
   // Reset per-run error and diagnostic tracking so the reports reflect only
   // this run.
   report.errors = [];
@@ -589,6 +600,10 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setPrinter(prevPrinter);
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);
+    helpers.setRetryConfig({
+      retries: prevRetries,
+      baseDelay: prevRetryBaseDelay,
+    });
   }
 }
 

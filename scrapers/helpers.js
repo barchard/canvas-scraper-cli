@@ -143,68 +143,127 @@ const exported = {
    * @returns {Promise<boolean>} whether or not the file was downloaded successfully
    */
   async downloadFile(url, cookies, dir, backupName) {
-    const response = await fetch(url, {
-      method: "GET",
-      credentials: "include",
-      headers: {
-        Cookie: cookies
-          .map((cookie) => `${cookie.name}=${cookie.value}`)
-          .join("; "),
-      },
-    });
-
-    // A non-2xx response never carries the file; bail before writing anything
-    // (e.g. an expired session yields a 401/403, or a broken link a 404).
-    if (!response.ok) {
-      report.recordFailure(url, this.describeHttpFailure(url, response.status));
-      return false;
-    }
-
-    let filename = backupName;
-    const contentDisposition = response.headers.get("content-disposition");
-    if (contentDisposition) {
-      // Servers spell the filename several ways; try each in preference order:
-      //   filename*=UTF-8''name.pdf  (RFC 5987, percent-encoded)
-      //   filename="name.pdf"        (quoted)
-      //   filename=name.pdf          (bare)
-      let extracted;
-      const star = contentDisposition.match(/filename\*=(?:[^']*''|)([^;]+)/i);
-      if (star) {
-        try {
-          extracted = decodeURIComponent(star[1].trim());
-        } catch {
-          extracted = star[1].trim();
-        }
-      } else {
-        const quoted = contentDisposition.match(/filename="([^"]+)"/i);
-        const bare = contentDisposition.match(/filename=([^;]+)/i);
-        extracted = quoted ? quoted[1] : bare ? bare[1].trim() : undefined;
-      }
-      if (extracted) filename = this.stripInvalid(extracted);
-    }
-
-    // No content-disposition filename means the server likely returned an error
-    // page instead of the file — the caller treats this as a failed download.
-    const ok = filename !== backupName;
-
-    // Dry-run: the fetch above already proved accessibility; record it and skip
-    // writing any bytes to disk.
-    if (this.dryRun) {
+    // One download attempt. Returns { ok, retryable, reason }; withRetry decides
+    // whether to try again. Success (report.record / recordAvailable) is recorded
+    // here since it ends the retry loop; the *failure* is recorded once by the
+    // caller below, after all retries are exhausted, so retries don't pollute the
+    // skipped report with intermediate attempts.
+    const once = async () => {
+      let response;
       try {
-        response.body?.destroy();
+        response = await fetch(url, {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            Cookie: cookies
+              .map((cookie) => `${cookie.name}=${cookie.value}`)
+              .join("; "),
+          },
+        });
       } catch (e) {
-        // ignore
+        // A network-level failure (DNS, reset, socket timeout) is transient.
+        return {
+          ok: false,
+          retryable: !this.dryRun,
+          reason: `network error: ${(e && e.message) || e}`,
+        };
       }
-      if (ok) report.recordAvailable(url, "file");
-      else report.recordFailure(url, "no file returned (missing content-disposition)");
-      return ok;
-    }
 
-    const filePath = path.join(dir, filename);
-    await this.streamToFile(response, filePath, filename);
-    if (ok) report.record(filePath, url);
-    else report.recordFailure(url, "no file returned (missing content-disposition)");
-    return ok;
+      // A non-2xx response never carries the file; bail before writing anything
+      // (e.g. an expired session yields a 401/403, or a broken link a 404).
+      // Only server-side/rate-limit statuses are worth retrying.
+      if (!response.ok) {
+        return {
+          ok: false,
+          retryable: !this.dryRun && this.isRetryableHttpStatus(response.status),
+          reason: this.describeHttpFailure(url, response.status),
+        };
+      }
+
+      let filename = backupName;
+      const contentDisposition = response.headers.get("content-disposition");
+      if (contentDisposition) {
+        // Servers spell the filename several ways; try each in preference order:
+        //   filename*=UTF-8''name.pdf  (RFC 5987, percent-encoded)
+        //   filename="name.pdf"        (quoted)
+        //   filename=name.pdf          (bare)
+        let extracted;
+        const star = contentDisposition.match(/filename\*=(?:[^']*''|)([^;]+)/i);
+        if (star) {
+          try {
+            extracted = decodeURIComponent(star[1].trim());
+          } catch {
+            extracted = star[1].trim();
+          }
+        } else {
+          const quoted = contentDisposition.match(/filename="([^"]+)"/i);
+          const bare = contentDisposition.match(/filename=([^;]+)/i);
+          extracted = quoted ? quoted[1] : bare ? bare[1].trim() : undefined;
+        }
+        if (extracted) filename = this.stripInvalid(extracted);
+      }
+
+      // No content-disposition filename means the server likely returned an error
+      // page instead of the file. That's a 200 with no attachment — a retry won't
+      // change it, so treat it as a permanent failure.
+      const ok = filename !== backupName;
+
+      // Dry-run: the fetch above already proved accessibility; record it and skip
+      // writing any bytes to disk.
+      if (this.dryRun) {
+        try {
+          response.body?.destroy();
+        } catch (e) {
+          // ignore
+        }
+        if (ok) {
+          report.recordAvailable(url, "file");
+          return { ok: true };
+        }
+        return {
+          ok: false,
+          retryable: false,
+          reason: "no file returned (missing content-disposition)",
+        };
+      }
+
+      if (!ok) {
+        try {
+          response.body?.destroy();
+        } catch (e) {
+          // ignore
+        }
+        return {
+          ok: false,
+          retryable: false,
+          reason: "no file returned (missing content-disposition)",
+        };
+      }
+
+      const filePath = path.join(dir, filename);
+      try {
+        await this.streamToFile(response, filePath, filename);
+      } catch (e) {
+        // A write/stream error mid-download may leave a partial file; don't retry
+        // (that would duplicate), just surface it.
+        return {
+          ok: false,
+          retryable: false,
+          reason: `write error: ${(e && e.message) || e}`,
+        };
+      }
+      report.record(filePath, url);
+      return { ok: true };
+    };
+
+    const res = await this.withRetry(once, { label: url, kind: "DOWNLOAD" });
+    if (!res.ok) {
+      report.recordFailure(
+        url,
+        (res.last && res.last.reason) || "download failed"
+      );
+    }
+    return res.ok;
   },
 
   /**
@@ -965,6 +1024,17 @@ const exported = {
       "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
       "-o",
       outTemplate,
+      // yt-dlp's own retries handle *within-download* hiccups (a dropped
+      // fragment, a transient read error) by resuming mid-file — far cheaper than
+      // our process-level withRetry, which restarts the whole download. Scale both
+      // to the configured retry count so --retries 0 disables this layer too, and
+      // back off exponentially (1s, 2s, … capped at 60s) between attempts.
+      "--retries",
+      String(this.retries || 0),
+      "--fragment-retries",
+      String(this.retries || 0),
+      "--retry-sleep",
+      "exp=1:60",
       // Emit one machine-readable progress line per update (rather than a
       // \r-updated bar) so we can parse it and drive our own progress display.
       "--newline",
@@ -1018,13 +1088,17 @@ const exported = {
       return Number.isFinite(n) ? n : null;
     };
 
-    return await new Promise((resolve) => {
+    // One yt-dlp run. Resolves { ok, retryable, reason }; withRetry decides
+    // whether to try again. A transient failure (network blip, rate-limit, the
+    // bot-check wall) is retried with backoff; a permanent one (private/removed
+    // video, unsupported URL) is given up on immediately.
+    const runOnce = () =>
+      new Promise((resolve) => {
       let child;
       try {
         child = spawn("yt-dlp", args, { windowsHide: true });
       } catch (e) {
-        this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.message);
-        return resolve(false);
+        return resolve({ ok: false, retryable: false, reason: e.message });
       }
 
       let stderr = "";
@@ -1123,10 +1197,12 @@ const exported = {
               0
             );
           }
-          return resolve(false);
+          // A missing binary can't be fixed by retrying; the warning above is
+          // printed once, so give up quietly (no reason → no duplicate warning).
+          return resolve({ ok: false, retryable: false, reason: null });
         }
-        this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, e.message);
-        resolve(false);
+        // A process-level spawn error (not a yt-dlp exit) is usually transient.
+        resolve({ ok: false, retryable: true, reason: e.message });
       });
 
       child.on("close", async (code) => {
@@ -1146,19 +1222,26 @@ const exported = {
         }
         if (code === 0) {
           report.recordNewFiles(absDir, before, url);
-          return resolve(true);
+          return resolve({ ok: true });
         }
         // ENOENT is handled by the 'error' handler above (no 'close' with 0).
-        this.print(
-          "WARNING",
-          "YT-DLP",
-          `Could not download ${url}`,
-          0,
-          stderr.trim() || `yt-dlp exited with code ${code}`
-        );
-        resolve(false);
+        const reason = stderr.trim() || `yt-dlp exited with code ${code}`;
+        resolve({
+          ok: false,
+          retryable: this.isRetryableYtDlpFailure(stderr),
+          reason,
+        });
       });
     });
+
+    // Retry transient yt-dlp failures (network/rate-limit/bot-check) with
+    // exponential backoff; print a single final warning only if it never
+    // succeeds. Permanent failures resolve with retryable:false and stop early.
+    const res = await this.withRetry(runOnce, { label: url, kind: "YT-DLP" });
+    if (!res.ok && res.last && res.last.reason) {
+      this.print("WARNING", "YT-DLP", `Could not download ${url}`, 0, res.last.reason);
+    }
+    return res.ok;
   },
 
   /** Lists every file under `dir` recursively (absolute paths). */
@@ -1653,6 +1736,111 @@ const exported = {
   /** Turns dry-run mode on or off. */
   setDryRun(on) {
     this.dryRun = !!on;
+  },
+
+  // How many *extra* attempts a transient download failure gets before it's
+  // given up on (0 = no retries, one attempt only). Set per-run by runScrape
+  // from --retries (default 3); the TUI toggles it on/off.
+  retries: 0,
+  // Base backoff in ms; each retry waits ~2^n of this (with jitter), capped at
+  // RETRY_MAX_DELAY. Set per-run from --retry-delay (default 2s).
+  retryBaseDelay: 2000,
+
+  /** Sets the retry policy for a run (extra attempts + base backoff in ms). */
+  setRetryConfig({ retries, baseDelay } = {}) {
+    if (Number.isFinite(retries)) this.retries = Math.max(0, Math.floor(retries));
+    if (Number.isFinite(baseDelay)) this.retryBaseDelay = Math.max(0, baseDelay);
+  },
+
+  /** Resolves after `ms` milliseconds. */
+  sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  },
+
+  /**
+   * Whether an HTTP status is worth retrying. 4xx client errors (401/403/404)
+   * are permanent for the current session — the file is locked, gone, or the
+   * link is broken — so only request-timeout, too-early, rate-limit and 5xx
+   * server errors are transient.
+   * @param {number} status
+   * @returns {boolean}
+   */
+  isRetryableHttpStatus(status) {
+    return (
+      status === 408 ||
+      status === 425 ||
+      status === 429 ||
+      (status >= 500 && status <= 599)
+    );
+  },
+
+  /**
+   * Runs `attempt` up to (this.retries + 1) times, backing off exponentially
+   * with full jitter between tries (capped at 60s). `attempt(n)` returns either
+   * a boolean or an object `{ ok, retryable?, reason? }`; a failing result is
+   * retried unless it sets `retryable: false` or the attempts are exhausted.
+   * Thrown errors are treated as transient failures. The between-attempt wait is
+   * announced via print() so a long download run isn't silent while it backs off.
+   * @param {(n: number) => Promise<boolean|{ok:boolean,retryable?:boolean,reason?:string}>} attempt
+   * @param {{label?: string, kind?: string}} [opts]
+   * @returns {Promise<{ok: boolean, last: any, attempts: number}>}
+   */
+  async withRetry(attempt, { label = "", kind = "RETRY" } = {}) {
+    const max = this.retries || 0;
+    const base = this.retryBaseDelay || 2000;
+    const RETRY_MAX_DELAY = 60000;
+    let last;
+    for (let n = 0; ; n++) {
+      try {
+        last = await attempt(n);
+      } catch (e) {
+        last = { ok: false, retryable: true, reason: (e && e.message) || String(e) };
+      }
+      const isObj = last && typeof last === "object";
+      const ok = isObj ? !!last.ok : !!last;
+      const retryable = isObj ? last.retryable !== false : true;
+      if (ok) return { ok: true, last, attempts: n + 1 };
+      if (n >= max || !retryable) return { ok: false, last, attempts: n + 1 };
+
+      // Exponential backoff with full jitter: wait a random slice of [half, full]
+      // of 2^n * base so simultaneous failures don't retry in lockstep.
+      const window = Math.min(RETRY_MAX_DELAY, base * 2 ** n);
+      const delay = Math.floor(window / 2 + Math.random() * (window / 2));
+      const reason = isObj && last.reason ? ` (${last.reason})` : "";
+      this.print(
+        "WARNING",
+        kind,
+        `Download failed${reason}; retry ${n + 1}/${max} in ${Math.round(
+          delay / 1000
+        )}s${label ? `: ${label}` : ""}`,
+        1
+      );
+      await this.sleep(delay);
+    }
+  },
+
+  /**
+   * Classifies a failed yt-dlp run (exit code + stderr) as transient (worth a
+   * retry: network blips, rate-limits, the "confirm you're not a bot" wall,
+   * fragment/HTTP 5xx errors) or permanent (a private/removed/unavailable video,
+   * an unsupported URL — retrying can't fix these).
+   * @param {string} stderr yt-dlp's stderr output
+   * @returns {boolean} whether the failure is worth retrying
+   */
+  isRetryableYtDlpFailure(stderr) {
+    const s = String(stderr || "").toLowerCase();
+    // Permanent: the content itself is gone or off-limits, or the URL isn't one
+    // yt-dlp can handle. No amount of retrying changes these.
+    if (
+      /private video|video unavailable|this video is (?:no longer |not )available|members-only|removed by the uploader|account (?:has been )?terminated|has been removed|is not available in your country|requested format (?:is )?not available|unsupported url|is not a valid url|no video formats found|video does not exist|copyright grounds/.test(
+        s
+      )
+    ) {
+      return false;
+    }
+    // Everything else (network errors, HTTP 429/5xx, "sign in to confirm you're
+    // not a bot", fragment/read timeouts, temporary failures) is worth a retry.
+    return true;
   },
 
   /**

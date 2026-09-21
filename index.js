@@ -151,6 +151,25 @@ flagDef.forEach((flag) =>
 );
 
 program.option("--all", "scrape all content types (-a -m -q -v -s)");
+
+// Parse a non-negative integer option value, falling back to `def` on garbage.
+const parseCount = (def) => (value) => {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+};
+
+program.option(
+  "--retries <n>",
+  "auto-retry each failed download up to n times with exponential backoff (0 disables)",
+  parseCount(3),
+  3
+);
+program.option(
+  "--retry-delay <seconds>",
+  "base backoff between download retries in seconds (grows exponentially, capped at 60s)",
+  parseCount(2),
+  2
+);
 program.option(
   "--courses <ids>",
   "comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses"
