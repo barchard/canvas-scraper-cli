@@ -22,6 +22,7 @@
     "quiz": "#content"
   },
   "videoHosts": [],
+  "panoptoUrl": "",
   "videosTabLabel": "Videos",
   "studyNetTabLabel": "Study.Net Materials",
   "transcribeCommand": ""
