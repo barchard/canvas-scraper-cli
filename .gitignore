@@ -10,3 +10,7 @@ cookies.json
 cookies.txt
 *-cookies.txt
 .DS_Store
+
+# pnpm artifacts (project uses npm)
+pnpm-lock.yaml
+pnpm-workspace.yaml

@@ -9,6 +9,8 @@ import { Readable } from "stream";
 
 import report from "./report.js";
 import manifest from "./manifest.js";
+import { detectPaywall, collectSignals, siteFor } from "./paywall.js";
+import { extractMarkdown } from "./articleMarkdown.js";
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -848,9 +850,9 @@ const exported = {
       // Archive what a reader sees (screen styles), not the print stylesheet.
       await page.emulateMediaType("screen").catch(() => {});
       // Render whatever loads; don't fail the whole thing on a slow idle timeout.
-      await page
+      const navResponse = await page
         .goto(url, { waitUntil: "networkidle2", timeout: 30000 })
-        .catch(() => {});
+        .catch(() => null);
 
       let name = "";
       try {
@@ -892,6 +894,31 @@ const exported = {
         return false;
       }
 
+      // Paywall check: a subscribe/login teaser renders fine and passes the bot
+      // wall test above, but isn't the article. Report it for follow-up (library
+      // login or manual import) instead of archiving the teaser as a success.
+      let paywall = { paywalled: false };
+      try {
+        const site = siteFor(url);
+        const signals = await page.evaluate(collectSignals, site ? site.selectors : []);
+        paywall = detectPaywall({
+          url,
+          finalUrl: page.url(),
+          status: navResponse && navResponse.status(),
+          signals,
+        });
+      } catch (e) {
+        // detection is best-effort; fall through and archive as before
+      }
+      if (paywall.paywalled) {
+        report.recordFailure(
+          url,
+          `paywalled (${paywall.confidence}): ${paywall.reason}`,
+          { destDir: dir }
+        );
+        return false;
+      }
+
       // Dry-run: the page rendered and isn't a bot wall, so it's an accessible
       // article — record it and skip writing the PDF.
       if (this.dryRun) {
@@ -917,6 +944,19 @@ const exported = {
         printBackground: true,
       });
       report.record(filePath, url);
+
+      // Companion Markdown copy of the article text (best-effort).
+      try {
+        const { title, markdown } = await page.evaluate(extractMarkdown);
+        if (markdown.length >= 200) {
+          const mdPath = filePath.replace(/\.pdf$/i, ".md");
+          const header = `# ${title || name.replace(/\.pdf$/i, "")}\n\nSource: ${url}\n\n`;
+          fs.writeFileSync(mdPath, header + markdown + "\n");
+          report.record(mdPath, url);
+        }
+      } catch (e) {
+        // the PDF is the primary artifact; a markdown failure is not an error
+      }
       return true;
     } catch (e) {
       return false;
