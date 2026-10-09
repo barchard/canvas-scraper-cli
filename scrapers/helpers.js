@@ -89,7 +89,7 @@ const exported = {
    */
   isTransientPageError(e) {
     const msg = (e && e.message) || String(e || "");
-    return /Target\.createTarget timed out|Requesting main frame too early|Navigation timeout|Runtime\.callFunctionOn timed out|Protocol error|Target closed|Session closed|socket hang up|net::ERR_/i.test(
+    return /Target\.createTarget timed out|Network\.enable timed out|protocolTimeout|Requesting main frame too early|Navigation timeout|Runtime\.callFunctionOn timed out|Protocol error|Target closed|Session closed|socket hang up|net::ERR_/i.test(
       msg
     );
   },
