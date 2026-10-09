@@ -89,7 +89,7 @@ const exported = {
    */
   isTransientPageError(e) {
     const msg = (e && e.message) || String(e || "");
-    return /Target\.createTarget timed out|Requesting main frame too early|Navigation timeout|Runtime\.callFunctionOn timed out|Protocol error|Target closed|Session closed|socket hang up|net::ERR_/i.test(
+    return /Target\.createTarget timed out|Network\.enable timed out|protocolTimeout|Requesting main frame too early|Navigation timeout|Runtime\.callFunctionOn timed out|Protocol error|Target closed|Session closed|socket hang up|net::ERR_/i.test(
       msg
     );
   },
@@ -301,6 +301,7 @@ const exported = {
       .join("; ");
 
     const courses = [];
+    this.courseListError = null;
     const seen = new Set();
     const add = (id, name) => {
       if (id === undefined || id === null) return;
@@ -322,9 +323,16 @@ const exported = {
           headers: { Cookie: cookieHeader, Accept: "application/json" },
         });
       } catch (e) {
+        this.courseListError = `could not reach ${domain} (${e.message})`;
         break;
       }
-      if (!response.ok) break;
+      if (!response.ok) {
+        this.courseListError =
+          response.status === 401 || response.status === 403
+            ? "Canvas rejected the saved cookies (session expired?)"
+            : `Canvas course API returned HTTP ${response.status}`;
+        break;
+      }
 
       let pageItems;
       try {
