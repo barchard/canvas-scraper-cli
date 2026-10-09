@@ -385,6 +385,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
 
   const [logs, setLogs] = React.useState([]);
   const [courses, setCourses] = React.useState([]);
+  const [courseFailure, setCourseFailure] = React.useState("");
   const [download, setDownload] = React.useState(null);
   const [transcribe, setTranscribe] = React.useState(null);
   const [status, setStatus] = React.useState({
@@ -497,7 +498,10 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         appendLogs([
           "[NOTE] COURSES | Tip: run the Log in action first to capture cookies.",
         ]);
-        if (!cancelled) setStep("types"); // fall back to all courses
+        if (!cancelled) {
+          setCourseFailure(e.message);
+          setStep("courseFail");
+        }
         return;
       }
       appendLogs(["[NOTE] COURSES | Fetching your courses…"]);
@@ -521,10 +525,10 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       }
       if (cancelled) return;
       if (!found.length) {
-        appendLogs([
-          "[WARNING] COURSES | No courses found — falling back to all courses.",
-        ]);
-        setStep("types");
+        const reason = helpers.courseListError || "no courses were returned";
+        appendLogs([`[WARNING] COURSES | No courses found: ${reason}`]);
+        setCourseFailure(reason);
+        setStep("courseFail");
         return;
       }
       setCourses(found);
@@ -747,6 +751,20 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     });
   } else if (step === "fetchCourses") {
     view = spin("Fetching your courses…");
+  } else if (step === "courseFail") {
+    view = h(SelectPrompt, {
+      message: `Couldn't list your courses: ${courseFailure}`,
+      items: [
+        { label: "Log in again to refresh cookies", value: "login" },
+        { label: "Scrape ALL courses anyway", value: "all" },
+        { label: "Back to menu", value: "menu" },
+      ],
+      onSelect: (value) => {
+        if (value === "login") onMenu("login");
+        else if (value === "all") setStep("types");
+        else setStep("menu");
+      },
+    });
   } else if (step === "course") {
     view = h(MultiSelectPrompt, {
       message: `Which courses? (${courses.length} found)`,
@@ -817,7 +835,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
   const transcribeLines = showProgress && transcribe ? progressBlock(transcribe) : null;
 
   const showLogs =
-    done || ["login", "fetchCourses", "scraping"].includes(step);
+    done || ["login", "fetchCourses", "courseFail", "scraping"].includes(step);
   const logBox = showLogs
     ? h(
         Box,

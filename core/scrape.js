@@ -367,6 +367,23 @@ async function scrapeCourse(
   }
 }
 
+/**
+ * Whether an error means the browser itself is wedged or gone (CDP command
+ * timeout, closed target/session, dropped connection) rather than a problem
+ * with one page — i.e. worth relaunching Chrome for.
+ * @param {any} e
+ * @returns {boolean}
+ */
+function isBrowserFault(e) {
+  const msg = (e && e.message) || "";
+  return (
+    e?.name === "ProtocolError" ||
+    /timed out|protocolTimeout|Target closed|Session closed|Connection closed|Browser has disconnected|Navigating frame was detached/i.test(
+      msg
+    )
+  );
+}
+
 /** Writes the report CSVs (if --report). Errors are logged, not thrown. */
 function writeReports(dir) {
   try {
@@ -527,6 +544,7 @@ export async function runScrape(url, options, hooks = {}) {
   report.diagnostics = [];
 
   let browser;
+  let removeUnhandledListener = () => {};
   // Hoisted so the finally can always write errors.csv, even if the run throws.
   let dir = options.output;
   try {
@@ -569,6 +587,54 @@ export async function runScrape(url, options, hooks = {}) {
     // the bundled browser if no local Chrome is found.
     browser = await launchBrowser();
 
+    // Puppeteer fires some CDP calls from event handlers nobody awaits (e.g.
+    // "Network.enable timed out" while attaching a new tab), so the rejection
+    // can't be caught by a try/catch and would crash the whole process. Catch
+    // it here, kill the wedged Chrome so any in-flight awaits reject instead of
+    // hanging, and let scrapeCourseResilient relaunch and resume the course.
+    const onUnhandled = (reason) => {
+      if (!isBrowserFault(reason)) {
+        process.removeListener("unhandledRejection", onUnhandled);
+        throw reason; // not ours: restore Node's default crash behaviour
+      }
+      helpers.print(
+        "WARNING",
+        "BROWSER",
+        "Chrome stopped responding; restarting it and resuming",
+        0,
+        reason.message
+      );
+      try {
+        browser?.process()?.kill("SIGKILL");
+      } catch {}
+    };
+    process.on("unhandledRejection", onUnhandled);
+    removeUnhandledListener = () =>
+      process.removeListener("unhandledRejection", onUnhandled);
+
+    // Runs scrapeCourse, and if the browser wedges or dies mid-course, relaunches
+    // Chrome and re-runs it. The manifest makes the re-run skip everything that
+    // already finished, so this effectively resumes where it left off.
+    const scrapeCourseResilient = async (...args) => {
+      const maxAttempts = 3;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await scrapeCourse(browser, ...args);
+        } catch (e) {
+          if (attempt >= maxAttempts || !isBrowserFault(e)) throw e;
+          helpers.print(
+            "WARNING",
+            "BROWSER",
+            `Browser failed mid-course (attempt ${attempt}/${maxAttempts}); relaunching and resuming`,
+            0,
+            e.message
+          );
+          await browser.close().catch(() => {});
+          browser = await launchBrowser();
+        }
+      }
+    };
+
     let courseCount = 0;
     if (courseId) {
       // single course -> its own self-contained folder inside the main folder,
@@ -578,7 +644,7 @@ export async function runScrape(url, options, hooks = {}) {
       const courseDir = `${dir}/${courseFolderName(courseName, courseId, null)}`;
       onProgress({ type: "start", mode: "single", total: 1 });
       onProgress({ type: "course", index: 1, total: 1, name: courseName, url: courseUrl });
-      await scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape, courseName, onProgress);
+      await scrapeCourseResilient(cookies, courseUrl, courseDir, toScrape, courseName, onProgress);
       onProgress({ type: "course-end", index: 1, total: 1 });
       courseCount = 1;
     } else {
@@ -635,7 +701,7 @@ export async function runScrape(url, options, hooks = {}) {
           });
           const courseDir = `${dir}/${courseFolderName(c.name, c.id, usedFolders)}`;
           try {
-            await scrapeCourse(browser, cookies, courseUrl, courseDir, toScrape, c.name, onProgress);
+            await scrapeCourseResilient(cookies, courseUrl, courseDir, toScrape, c.name, onProgress);
             courseCount++;
           } catch (e) {
             helpers.print("ERROR", "COURSE", `Could not scrape ${c.name} (${c.id})`, 0, e);
@@ -716,6 +782,7 @@ export async function runScrape(url, options, hooks = {}) {
     emit("*** DONE ***");
     return summary;
   } finally {
+    removeUnhandledListener();
     if (browser) await browser.close().catch(() => {});
     // Always flush tracked errors to errors.csv (best-effort). This runs even
     // when the scrape threw, so a failed run still leaves a record to resolve.
