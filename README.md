@@ -407,7 +407,15 @@ Transcription is interleaved with downloading: as soon as each video finishes do
 "transcribeCommand": "open -a MacWhisper {}"
 ```
 
-Any other transcriber works too — e.g. a headless Whisper CLI: `"transcribeCommand": "whisper {} --model small --output_format txt"`. `-t` is opt-in and is ignored if `transcribeCommand` is empty.
+Any other transcriber works too — e.g. a headless Whisper CLI: `"transcribeCommand": "whisper {} --model small --output_format txt"`. `-t` is opt-in.
+
+**Auto-detection:** if `transcribeCommand` is empty, `-t` picks the first installed transcriber for your OS (macOS: `mlx_whisper`, `whisperkit-cli`, `whisper`; Windows: `whisper-faster`, `faster-whisper-xxl`, `whisper`; Linux: `faster-whisper-xxl`, `whisper`) and writes a `.txt` transcript next to each video. In a custom command, `{}` is the video path and `{dir}` is its folder.
+
+**Re-transcribe everything already downloaded** (no login or browser needed):
+
+```bash
+node index.js retranscribe -o courses
+```
 
 #### Whisper on Windows (pure binary via Scoop)
 

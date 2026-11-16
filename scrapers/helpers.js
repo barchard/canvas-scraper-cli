@@ -1096,7 +1096,7 @@ const exported = {
     let transcribeCmd = "";
     if (process.env.transcribe === "true") {
       try {
-        transcribeCmd = JSON.parse(process.env.config || "{}").transcribeCommand || "";
+        transcribeCmd = process.env.transcribeCommand || "";
       } catch (e) {
         // no/invalid config
       }
@@ -1353,9 +1353,10 @@ const exported = {
     return new Promise((resolve) => {
       const name = path.basename(file);
       const quoted = this.shellQuote(file);
-      const fullCmd = cmd.includes("{}")
-        ? cmd.replaceAll("{}", quoted)
-        : `${cmd} ${quoted}`;
+      const withDir = cmd.replaceAll("{dir}", this.shellQuote(path.dirname(file)));
+      const fullCmd = withDir.includes("{}")
+        ? withDir.replaceAll("{}", quoted)
+        : `${withDir} ${quoted}`;
 
       this.emitProgress({ scope: "transcribe", phase: "start", name, index, count });
       const start = Date.now();

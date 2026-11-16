@@ -10,6 +10,7 @@ import { runScrape, parseTarget, readCookies } from "../core/scrape.js";
 import { runLogin } from "../core/login.js";
 import { launchBrowser } from "../core/browser.js";
 import helpers from "../scrapers/helpers.js";
+import { retranscribeAll } from "../core/transcribe.js";
 
 // Written with React.createElement (no JSX) so the app needs no build/transform
 // step and stays friendly to the nexe binary packaging.
@@ -601,6 +602,36 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     };
   }, [step]);
 
+  // Re-transcribe phase: run the transcriber over every downloaded video.
+  React.useEffect(() => {
+    if (step !== "retranscribing") return undefined;
+    let cancelled = false;
+    const prevPrinter = helpers.printer;
+    const prevSink = helpers.progressSink;
+    helpers.setPrinter((rec) => {
+      if (!cancelled) appendLogs(recordToLines(rec));
+    });
+    helpers.setProgressSink((evt) => {
+      if (!cancelled) setTranscribe(evt.phase === "done" ? null : evt);
+    });
+    retranscribeAll(configRef.current.output || "courses")
+      .then((n) => {
+        if (cancelled) return;
+        setSummary({ retranscribed: n });
+        setDone(true);
+      })
+      .catch((e) => {
+        if (!cancelled) fail(e);
+      })
+      .finally(() => {
+        helpers.setPrinter(prevPrinter);
+        helpers.setProgressSink(prevSink);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step]);
+
   // Let the final frame paint, then exit cleanly. The error (if any) is reported
   // through onFinish rather than exit() — passing an Error to Ink's exit() would
   // reject waitUntilExit() and dump a stack trace over the rendered UI.
@@ -633,6 +664,8 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     } else if (value === "login") {
       loginStarted.current = false;
       setStep("cookiesPathLogin");
+    } else if (value === "retranscribe") {
+      setStep("retranscribeDir");
     } else if (value === "about") {
       setStep("about");
     } else if (value === "changeUrl") {
@@ -640,6 +673,11 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     } else if (value === "exit") {
       setDone(true);
     }
+  };
+
+  const onRetranscribeDir = (value) => {
+    configRef.current.output = value || "courses";
+    setStep("retranscribing");
   };
 
   const onCookiesPathLogin = (value) => {
@@ -713,6 +751,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       message: `What would you like to do? (${configRef.current.url})`,
       items: [
         { label: "Scrape / download from courses", value: "scrape" },
+        { label: "Re-transcribe all downloaded videos", value: "retranscribe" },
         { label: "Log in (opens a browser to capture cookies)", value: "login" },
         { label: "About (version, system & git info)", value: "about" },
         { label: "Change Canvas URL", value: "changeUrl" },
@@ -720,6 +759,14 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
       ],
       onSelect: onMenu,
     });
+  } else if (step === "retranscribeDir") {
+    view = h(TextPrompt, {
+      message: "Folder containing the downloaded videos:",
+      initialValue: configRef.current.output || "courses",
+      onSubmit: onRetranscribeDir,
+    });
+  } else if (step === "retranscribing") {
+    view = spin("Re-transcribing downloaded videos");
   } else if (step === "about") {
     view = h(
       Box,
@@ -830,12 +877,12 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
   // Live download and transcription progress (they run concurrently, so each
   // shows on its own line). Otherwise the big Panopto/video jobs are a single
   // opaque line.
-  const showProgress = !done && step === "scraping";
+  const showProgress = !done && (step === "scraping" || step === "retranscribing");
   const downloadLines = showProgress && download ? progressBlock(download) : null;
   const transcribeLines = showProgress && transcribe ? progressBlock(transcribe) : null;
 
   const showLogs =
-    done || ["login", "fetchCourses", "courseFail", "scraping"].includes(step);
+    done || ["login", "fetchCourses", "courseFail", "scraping", "retranscribing"].includes(step);
   const logBox = showLogs
     ? h(
         Box,
@@ -855,7 +902,9 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     : null;
 
   const summaryBox =
-    done && !error && summary
+    done && !error && summary && summary.retranscribed != null
+      ? h(Text, { color: "green" }, `Re-transcribed ${summary.retranscribed} video(s).`)
+      : done && !error && summary
       ? h(
           Box,
           { flexDirection: "column", marginTop: 1 },
