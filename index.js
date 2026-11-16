@@ -90,6 +90,14 @@ const flagDef = [
   },
   {
     type: "confirm",
+    name: "z",
+    message: "Do you want to download the Zoom tab's cloud recordings?",
+    default: false,
+    flags: "-z",
+    description: "download the Zoom tab's cloud recordings (and transcripts)",
+  },
+  {
+    type: "confirm",
     name: "t",
     message:
       "Do you want to transcribe downloaded videos? (uses config.json transcribeCommand, or an auto-detected transcriber)",
@@ -348,7 +356,7 @@ program.action(async (url, options) => {
     // didn't (a bare interactive `<url>` or `--tui <url>`), open the action
     // menu instead of scraping; flag-driven runs stay non-interactive.
     const hasContentFlags =
-      options.a || options.m || options.q || options.v || options.s || options.all;
+      options.a || options.m || options.q || options.v || options.s || options.z || options.all;
 
     // Passing --courses or --dry-run is an explicit non-interactive intent to
     // scrape (content defaults to everything), so don't divert to the action

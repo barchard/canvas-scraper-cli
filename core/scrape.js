@@ -147,6 +147,7 @@ function resolveToScrape(options) {
     q: options.q,
     v: options.v,
     s: options.s,
+    z: options.z,
   };
   if (options.all) for (const key in toScrape) toScrape[key] = true;
   if (Object.values(toScrape).every((v) => !v)) {
@@ -163,6 +164,7 @@ const PHASES = [
   ["q", "Quizzes", scrapers.scrapeQuizzes],
   ["v", "Videos", scrapers.scrapeVideos],
   ["s", "Study.Net", scrapers.scrapeStudyNet],
+  ["z", "Zoom", scrapers.scrapeZoom],
 ];
 
 // Top-level output folder each phase writes into — used to scope manifest
@@ -173,6 +175,7 @@ const CATEGORY_BY_KEY = {
   q: "QUIZZES",
   v: "VIDEOS",
   s: "STUDYNET",
+  z: "ZOOM",
 };
 
 /**
