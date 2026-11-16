@@ -4,6 +4,7 @@ import inquirer from "inquirer";
 
 import helpers from "./scrapers/helpers.js";
 import { runScrape } from "./core/scrape.js";
+import { retranscribeAll } from "./core/transcribe.js";
 import { runLogin } from "./core/login.js";
 import { runImport } from "./core/import.js";
 import { renderTui } from "./tui/app.js";
@@ -91,10 +92,10 @@ const flagDef = [
     type: "confirm",
     name: "t",
     message:
-      "Do you want to transcribe downloaded videos? (runs config.json transcribeCommand)",
+      "Do you want to transcribe downloaded videos? (uses config.json transcribeCommand, or an auto-detected transcriber)",
     default: false,
     flags: "-t",
-    description: "transcribe downloaded videos via config.json transcribeCommand",
+    description: "transcribe downloaded videos (config.json transcribeCommand, or auto-detected)",
   },
   {
     type: "confirm",
@@ -266,6 +267,23 @@ program
       );
     } catch (e) {
       helpers.print("ERROR", "IMPORT", e.message || String(e), 0);
+      process.exit(1);
+    }
+  });
+
+// `retranscribe` subcommand: re-run the transcriber over every video already
+// downloaded into the output folder. No browser or login needed.
+program
+  .command("retranscribe [output]")
+  .description("re-transcribe every video already downloaded into the output folder")
+  .option("-o, --output <dir>", "output directory to scan", "courses")
+  .action(async (output, opts, cmd) => {
+    try {
+      const merged = cmd.optsWithGlobals();
+      const dir = output || merged.output || "courses";
+      await retranscribeAll(dir);
+    } catch (e) {
+      helpers.print("ERROR", "TRANSCRIBE", e.message || String(e), 0);
       process.exit(1);
     }
   });

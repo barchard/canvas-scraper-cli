@@ -9,6 +9,7 @@ import report from "../scrapers/report.js";
 import manifest from "../scrapers/manifest.js";
 import wiki from "../scrapers/wiki.js";
 import octarine from "../scrapers/octarine.js";
+import { resolveTranscribeCommand, NO_TRANSCRIBER_HINT } from "./transcribe.js";
 
 /**
  * Headless scrape core. Every front-end (the CLI, the Ink TUI, and eventually
@@ -552,16 +553,16 @@ export async function runScrape(url, options, hooks = {}) {
     const cookies = readCookies(options.cookies);
     process.env.config = JSON.stringify(readJSON("config.json", "config"));
 
-    // opt-in transcription of downloaded videos (via config.json transcribeCommand)
+    // opt-in transcription of downloaded videos: config.json transcribeCommand,
+    // else auto-detected from the installed transcribers.
     if (options.t) {
       process.env.transcribe = "true";
-      if (!JSON.parse(process.env.config).transcribeCommand) {
-        helpers.print(
-          "WARNING",
-          "TRANSCRIBE",
-          'Transcription enabled (-t) but "transcribeCommand" is empty in config.json. Videos will not be transcribed.',
-          0
-        );
+      const t = resolveTranscribeCommand(JSON.parse(process.env.config));
+      process.env.transcribeCommand = t.command;
+      if (t.source === "auto") {
+        helpers.print("INFO", "TRANSCRIBE", `Auto-detected transcriber: ${t.tool}`, 0);
+      } else if (!t.command) {
+        helpers.print("WARNING", "TRANSCRIBE", `Transcription enabled (-t). ${NO_TRANSCRIBER_HINT} Videos will not be transcribed.`, 0);
       }
     }
 

@@ -10,7 +10,8 @@ const exported = {
    */
   async scrapeDescription(page, cookies, dir) {
     // print assignment preview (a dry-run writes nothing, so skip the folder)
-    if (!helpers.dryRun) fs.mkdirSync(`${dir}`);
+    // recursive: a resumed run finds the folder already there
+    if (!helpers.dryRun) fs.mkdirSync(dir, { recursive: true });
     await helpers.capturePdf(page, {
       path: `${dir}/ASSIGNMENT.pdf`,
       format: "Letter",
