@@ -666,6 +666,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     cfg.q = values.includes("q");
     cfg.v = values.includes("v");
     cfg.s = values.includes("s");
+    cfg.z = values.includes("z");
     setStep("output");
   };
 
@@ -746,6 +747,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         { label: "Quizzes", value: "q", checked: true },
         { label: "Videos (Panopto)", value: "v", checked: true },
         { label: "Study.Net Materials", value: "s", checked: true },
+        { label: "Zoom cloud recordings", value: "z", checked: true },
       ],
       onSubmit: onTypes,
     });

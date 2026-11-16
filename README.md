@@ -129,6 +129,7 @@ Options:
   -q                       scrape quizzes (default: false)
   -v                       scrape the Videos (Panopto) page (default: false)
   -s                       scrape the Study.Net Materials page (default: false)
+  -z                       download the Zoom tab's cloud recordings (and transcripts) (default: false)
   -t                       transcribe downloaded videos via config.json transcribeCommand (default: false)
   --dry-run                probe every article/artifact for accessibility and write dry-run-report.csv, without downloading anything (default: false)
   --report                 write a report.csv listing every downloaded asset (default: false)
@@ -137,7 +138,7 @@ Options:
   --fresh                  wipe each course folder and re-download from scratch; the default resumes, keeping files already on disk (default: false)
   --force                  re-download assets even when the manifest says they're already complete (default: trust the manifest and skip them) (default: false)
   --prune                  delete local files whose source is gone from the course (default: keep them, only flag them in the manifest) (default: false)
-  --all                    scrape all content types (-a -m -q -v -s)
+  --all                    scrape all content types (-a -m -q -v -s -z)
   --courses <ids>          comma-separated course ids to scrape (subset of a bare-domain URL); omit for all courses
   --tui                    run with the interactive terminal UI (Ink)
   --login                  open a browser to log in and capture cookies before scraping
@@ -391,6 +392,8 @@ The `-v` flag archives the course's **Videos** tab (the Panopto course folder): 
 
 The `-s` flag archives the course's **Study.Net Materials** tab into `STUDYNET/`. Study.Net is a third-party course-pack tool reached through a signed Canvas LTI launch: the scraper opens the tab while signed in, which performs the launch and renders the materials list, then downloads each material (the per-user watermarked PDF / spreadsheet) into `STUDYNET/`. Files are saved **in the instructor's order** with a zero-padded numeric prefix (`01 - <name>.pdf`, `02 - …`) so they sort correctly on disk instead of alphabetically; the numbering matches the list you see in the tab. Website links the instructor included in the list are saved in place as `.url` shortcuts (e.g. `03 - <name> (LINK).url`), keeping the reading list complete and contiguous. The launch usually establishes the Study.Net session on its own, but in practice it's much more reliable if your captured cookies already include a Study.Net session — so if you **never opened a Study.Net page while logging in**, downloads can fail. The easiest way to get one is to open any course's **Study.Net Materials** tab once in the browser during the interactive `login` flow; the login checker now flags a missing Study.Net session and prompts you to do exactly that before it saves your cookies (you can also add a `www.study.net` `PHPSESSID` cookie by hand, or set `"studyNetUrl"` in `config.json` to have the login flow open it for you — note a Study.Net session is short-lived, roughly a day). If the session is missing at scrape time, the run **reports it clearly** (rather than failing silently) and doesn't leave an empty `STUDYNET/` folder behind. The nav tab is matched by the label `Study.Net Materials` by default; if your course names it differently, set `"studyNetTabLabel"` in `config.json`. Anything the tool refuses to hand over (view-only content) is skipped with a warning that points you to the tab so you can open it manually.
 
+The `-z` flag archives the course's **Zoom** tab (the Zoom LTI Pro app) into `ZOOM/`. It opens the tab while signed in and lists the course's **cloud recordings** through the tab's own API. Then it signs in to your institution's Zoom (e.g. `mit.zoom.us`) through its SAML SSO, which reuses the identity-provider session already in your cookies, so no extra login step is needed. Finally it downloads every recording's MP4 via `yt-dlp`. This works **even when the host has turned off downloads**, because it saves the same stream the web player plays. Files are named `<YYYY-MM-DD HHMM> <topic>.mp4` in the meeting's time zone. A meeting with several MP4s (for example separate speaker and shared-screen views) gets ` - part N` suffixes. When the player has a transcript, it's saved next to the video as a `.vtt` with speaker names. Recordings already on disk are skipped on a re-run. If SSO fails (an expired identity-provider session), the run says so and you can re-capture cookies with `login`. The nav tab is matched by the label `Zoom` by default; if your course names it differently, set `"zoomTabLabel"` in `config.json`. yt-dlp's own Zoom extractor can't handle these links, so the scraper resolves the signed media URL itself and hands that to `yt-dlp`.
+
 ### Transcribing videos
 
 The `-t` flag runs a transcription command on each downloaded video. Set the command in `config.json` as `"transcribeCommand"`; it runs once per finished file, replacing `{}` with the video's path (covering playlists/Panopto folders automatically). If `{}` is omitted, the file path is appended.
@@ -501,6 +504,9 @@ Some course materials are **LTI external-tool launches** rather than direct file
 - STUDYNET
   - {NN - Material Name.pdf / .xlsx / …}
   - {NN - Website Name (LINK).url}
+- ZOOM
+  - {YYYY-MM-DD HHMM Topic.mp4}
+  - {YYYY-MM-DD HHMM Topic.vtt}
 - HOMEPAGE.pdf
 
 ## Development

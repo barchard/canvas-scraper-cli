@@ -645,29 +645,47 @@ const exported = {
       ytDlpCookieFile = "";
       return null;
     }
+    const file = path.join(os.tmpdir(), `canvas-scraper-cookies-${process.pid}.txt`);
+    ytDlpCookieFile = this.writeNetscapeCookieFile(cookies, file) || "";
+    return ytDlpCookieFile || null;
+  },
+
+  /**
+   * Renders puppeteer-style cookies as a Netscape HTTP Cookie File (the format
+   * yt-dlp's --cookies reads).
+   * @param {Array<object>} cookies puppeteer-style cookies (name, value, domain, ...)
+   * @returns {string} the file contents
+   */
+  netscapeCookieText(cookies) {
+    const lines = ["# Netscape HTTP Cookie File"];
+    for (const c of cookies || []) {
+      if (!c.name || !c.domain) continue;
+      const domain = c.domain;
+      const includeSub = domain.startsWith(".") ? "TRUE" : "FALSE";
+      const cookiePath = c.path || "/";
+      const secure = c.secure ? "TRUE" : "FALSE";
+      // 0 = session cookie; yt-dlp accepts these.
+      const expiry = Math.floor(c.expires && c.expires > 0 ? c.expires : 0);
+      lines.push(
+        [domain, includeSub, cookiePath, secure, expiry, c.name, c.value].join("\t")
+      );
+    }
+    return lines.join("\n") + "\n";
+  },
+
+  /**
+   * Writes cookies to `file` as a Netscape cookie file (owner-only perms, since
+   * it holds session tokens). Returns the path, or null if it couldn't be written.
+   * @param {Array<object>} cookies puppeteer-style cookies
+   * @param {string} file destination path
+   * @returns {string|null}
+   */
+  writeNetscapeCookieFile(cookies, file) {
     try {
-      const lines = ["# Netscape HTTP Cookie File"];
-      for (const c of cookies) {
-        if (!c.name || !c.domain) continue;
-        const domain = c.domain;
-        const includeSub = domain.startsWith(".") ? "TRUE" : "FALSE";
-        const cookiePath = c.path || "/";
-        const secure = c.secure ? "TRUE" : "FALSE";
-        // 0 = session cookie; yt-dlp accepts these.
-        const expiry = Math.floor(c.expires && c.expires > 0 ? c.expires : 0);
-        lines.push(
-          [domain, includeSub, cookiePath, secure, expiry, c.name, c.value].join(
-            "\t"
-          )
-        );
-      }
-      const file = path.join(os.tmpdir(), `canvas-scraper-cookies-${process.pid}.txt`);
-      fs.writeFileSync(file, lines.join("\n") + "\n");
-      ytDlpCookieFile = file;
+      fs.writeFileSync(file, this.netscapeCookieText(cookies), { mode: 0o600 });
       return file;
     } catch (e) {
       this.print("WARNING", "YT-DLP", "Could not build cookie file for yt-dlp", 0, e);
-      ytDlpCookieFile = "";
       return null;
     }
   },
@@ -981,11 +999,12 @@ const exported = {
    * @param {Array<object>} [cookies] cookies to authenticate with
    * @returns {Promise<boolean>} whether the video appears accessible
    */
-  async probeVideo(url, cookies) {
+  async probeVideo(url, cookies, opts = {}) {
     const args = ["--simulate", "--no-warnings", "--quiet"];
     if (this.videoUrlKind(url) === "single") args.push("--no-playlist");
-    const cookieFile = this.getYtDlpCookieFile(cookies);
+    const cookieFile = opts.cookieFile || this.getYtDlpCookieFile(cookies);
     if (cookieFile) args.push("--cookies", cookieFile);
+    if (opts.referer) args.push("--referer", opts.referer);
     args.push(url);
 
     return await new Promise((resolve) => {
@@ -1025,13 +1044,19 @@ const exported = {
    * @param {string} url video URL (viewer/embed/watch page)
    * @param {string} dir directory to download to
    * @param {Array<object>} [cookies] cookies to authenticate with
+   * @param {object} [opts]
+   * @param {string} [opts.cookieFile] a Netscape cookie file to use instead of
+   *   the one built from `cookies` (e.g. a provider session captured mid-run)
+   * @param {string} [opts.referer] Referer header to send (some CDNs require it)
+   * @param {string} [opts.filename] output basename (no extension) instead of
+   *   yt-dlp's %(title)s — for direct media URLs whose "title" is meaningless
    * @returns {Promise<boolean>} whether the video was downloaded successfully
    */
-  async downloadVideo(url, dir, cookies) {
+  async downloadVideo(url, dir, cookies, opts = {}) {
     // Dry-run: ask yt-dlp to --simulate the download (resolve the video and its
     // formats without fetching any media) so we learn whether it's accessible
     // without downloading gigabytes.
-    if (this.dryRun) return this.probeVideo(url, cookies);
+    if (this.dryRun) return this.probeVideo(url, cookies, opts);
 
     const kind = this.videoUrlKind(url);
     // Use an absolute output path: on Windows yt-dlp only applies extended-length
@@ -1040,8 +1065,11 @@ const exported = {
     const absDir = path.resolve(dir);
     // Folders/playlists nest their videos under a subfolder named for the
     // playlist; single sessions land flat in `dir`.
-    const outTemplate =
-      kind === "playlist"
+    // A caller-chosen filename has "%" escaped so yt-dlp doesn't treat it as a
+    // template field.
+    const outTemplate = opts.filename
+      ? path.join(absDir, `${opts.filename.replace(/%/g, "%%")}.%(ext)s`)
+      : kind === "playlist"
         ? path.join(absDir, "%(playlist_title)s", "%(title)s.%(ext)s")
         : path.join(absDir, "%(title)s.%(ext)s");
 
@@ -1087,8 +1115,9 @@ const exported = {
       path.join(path.resolve(archiveDir), ".yt-dlp-archive.txt")
     );
 
-    const cookieFile = this.getYtDlpCookieFile(cookies);
+    const cookieFile = opts.cookieFile || this.getYtDlpCookieFile(cookies);
     if (cookieFile) args.push("--cookies", cookieFile);
+    if (opts.referer) args.push("--referer", opts.referer);
 
     // Optional post-download transcription: run the configured command on each
     // finished file. Rather than yt-dlp's --exec (opaque), we run it ourselves
