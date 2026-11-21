@@ -532,6 +532,9 @@ export async function runScrape(url, options, hooks = {}) {
   const prevFresh = helpers.fresh;
   helpers.setFresh(!!options.fresh);
 
+  // Restored in the finally; set once the cookies file has been read.
+  const prevCookieJar = helpers.cookieJar;
+
   // --force re-downloads assets the manifest already marks complete (in case an
   // on-disk file is suspected corrupt); the default trusts the manifest.
   const prevForce = manifest.force;
@@ -554,6 +557,8 @@ export async function runScrape(url, options, hooks = {}) {
   try {
     const { domain, courseId } = parseTarget(url);
     const cookies = readCookies(options.cookies);
+    // External articles get the cookies for their own site from this jar.
+    helpers.setCookieJar(cookies);
     process.env.config = JSON.stringify(readJSON("config.json", "config"));
 
     // opt-in transcription of downloaded videos: config.json transcribeCommand,
@@ -798,6 +803,7 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);
     helpers.setFresh(prevFresh);
+    helpers.setCookieJar(prevCookieJar);
     manifest.setForce(prevForce);
     manifest.setPrune(prevPrune);
   }

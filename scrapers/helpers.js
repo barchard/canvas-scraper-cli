@@ -9,7 +9,9 @@ import { Readable } from "stream";
 
 import report from "./report.js";
 import manifest from "./manifest.js";
-import { detectPaywall, collectSignals, siteFor } from "./paywall.js";
+import { detectPaywall, collectSignals, siteFor, paywallReason } from "./paywall.js";
+import { cookiesForUrl } from "../core/cookieJar.js";
+import { detectBotWall, botWallReason } from "./botwall.js";
 import { extractMarkdown } from "./articleMarkdown.js";
 
 let warnedMissingYtDlp = false;
@@ -869,6 +871,10 @@ const exported = {
     let page;
     try {
       page = await browser.newPage();
+      // Send the user's saved cookies for this article's own site (e.g. an
+      // imported Economist session), so subscribed articles load in full.
+      const siteCookies = cookiesForUrl(this.cookieJar, url);
+      if (siteCookies.length) await page.setCookie(...siteCookies).catch(() => {});
       await page.setViewport({ width: 1280, height: 900 });
       // Present a normal browser UA; the default headless UA ("HeadlessChrome")
       // is blocked by some sites (e.g nytimes.com).
@@ -887,12 +893,12 @@ const exported = {
         // ignore
       }
 
-      // Detect a blocked render. Bot-walled sites (nytimes.com, bloomberg.com,
-      // Cloudflare, DataDome, ...) either serve an empty/near-empty page or a
-      // recognizable interstitial ("Are you a robot?", "Just a moment...",
-      // "enable JavaScript", a captcha). Archiving those produces a junk PDF
-      // that masquerades as the article, so report a failure and let the URL
-      // surface in the skipped report instead.
+      // Detect a blocked render. Bot-walled sites (The Economist, Cloudflare,
+      // DataDome, ...) serve an empty page or a recognizable interstitial
+      // ("Access is temporarily restricted", "Are you a robot?", a captcha).
+      // Archiving those produces a junk PDF that masquerades as the article, so
+      // warn on the console and record the reason for report-skipped.csv (and
+      // the dry-run report). We never try to get past the wall.
       let bodyText = "";
       try {
         bodyText = await page.evaluate(
@@ -901,22 +907,20 @@ const exported = {
       } catch (e) {
         // ignore
       }
-      const len = bodyText.trim().length;
-      // Strip the passive "protected by reCAPTCHA/hCaptcha" notice that many
-      // legitimate sites embed on newsletter and comment forms (e.g The
-      // Atlantic's footer). It is not a bot challenge, and letting the bare
-      // "captcha" keyword match it discards a perfectly good archive.
-      const probe = `${name}\n${bodyText}`
-        .toLowerCase()
-        .replace(/protected by (?:google )?(?:re)?captcha|protected by hcaptcha/g, "");
-      // A real bot wall serves a near-empty page or a short interstitial, so only
-      // trust an interstitial keyword on a short page. A full-length article that
-      // mentions one of these phrases in passing (e.g a course reading *about*
-      // CAPTCHAs or bot detection) is not blocked.
-      const interstitial =
-        /are you a robot|just a moment|access (?:to this page has been )?denied|enable javascript|please enable (?:js|cookies)|verify you are (?:a )?human|captcha|unusual traffic|request (?:was )?blocked/;
-      const blocked = len < 200 || (len < 1000 && interstitial.test(probe));
-      if (blocked) {
+      const wall = detectBotWall({ title: name, text: bodyText });
+      if (wall.blocked) {
+        const reason = botWallReason(url, wall);
+        this.print("WARNING", "BLOCKED", reason, 1, url);
+        report.recordFailure(url, reason, { destDir: dir });
+        report.recordDiagnostic({
+          kind: "bot-wall",
+          url,
+          finalUrl: page.url(),
+          status: navResponse ? navResponse.status() : 0,
+          title: name,
+          wall: wall.kind,
+          match: wall.match,
+        });
         return false;
       }
 
@@ -937,11 +941,12 @@ const exported = {
         // detection is best-effort; fall through and archive as before
       }
       if (paywall.paywalled) {
-        report.recordFailure(
+        const reason = paywallReason(paywall, {
           url,
-          `paywalled (${paywall.confidence}): ${paywall.reason}`,
-          { destDir: dir }
-        );
+          hasCookies: cookiesForUrl(this.cookieJar, url).length > 0,
+        });
+        this.print("WARNING", "PAYWALL", reason, 1, url);
+        report.recordFailure(url, reason, { destDir: dir });
         return false;
       }
 
@@ -1856,6 +1861,16 @@ const exported = {
   /** Turns fresh (wipe-and-rebuild) mode on or off. */
   setFresh(on) {
     this.fresh = !!on;
+  },
+
+  // The run's cookie jar, so pages opened outside a Canvas session (external
+  // articles) can be given the cookies for their own site. Set/reset by
+  // runScrape (like dryRun).
+  cookieJar: [],
+
+  /** Sets the cookies available to external-article fetches. */
+  setCookieJar(cookies) {
+    this.cookieJar = Array.isArray(cookies) ? cookies : [];
   },
 
   /**

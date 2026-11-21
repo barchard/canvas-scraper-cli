@@ -3,6 +3,15 @@ import readline from "readline";
 
 import { launchBrowser } from "./browser.js";
 import { parseTarget } from "./scrape.js";
+import {
+  filterCookiesForSites,
+  mergeCookies,
+  normalizeCookies,
+  parseSites,
+  writeCookies,
+} from "./cookieJar.js";
+import { readJarIfPresent } from "./cookieImport.js";
+import { detectBotWall } from "../scrapers/botwall.js";
 import helpers from "../scrapers/helpers.js";
 
 /**
@@ -31,9 +40,6 @@ import helpers from "../scrapers/helpers.js";
  * Each strategy is `async ({ url, logger, prompt }) => cookies[]`, where the
  * returned cookies are raw CDP cookie objects (normalized by runLogin).
  */
-
-/** Fields Chrome's CDP sameSite may report that puppeteer's setCookie accepts. */
-const VALID_SAME_SITE = new Set(["Strict", "Lax", "None"]);
 
 // Public video providers that serve without a login, so their cookies aren't
 // needed for downloads — excluded from the "did we capture auth cookies?" check.
@@ -207,9 +213,106 @@ async function freshSession({ url, logger, prompt }) {
   }
 }
 
+/**
+ * "site" strategy (`login --site economist.com`): sign in to publisher sites
+ * that Canvas links to. Opens each site in a visible Chrome window, waits for
+ * the user to sign in with their own account, then keeps only those sites'
+ * cookies. Works the same on every OS and whatever browser the user normally
+ * uses, and needs no access to that browser's cookie store.
+ */
+async function siteSession({ sites, logger, prompt }) {
+  const browser = await launchBrowser({ headless: false });
+  try {
+    const first = (await browser.pages())[0] || (await browser.newPage());
+    const tabs = [];
+    for (let i = 0; i < sites.length; i++) {
+      const tab = i === 0 ? first : await browser.newPage();
+      await tab.goto(`https://${sites[i]}`, { waitUntil: "domcontentloaded" }).catch(() => {});
+      tabs.push(tab);
+    }
+
+    // Sites that refuse automated browsers outright (e.g The Economist's
+    // "Access is temporarily restricted" page). We never try to get past that;
+    // we say so, and point to importing the cookies from the user's own browser.
+    const walled = async () => {
+      const out = [];
+      for (let i = 0; i < sites.length; i++) {
+        if (await isBotWalled(tabs[i])) out.push(sites[i]);
+      }
+      return out;
+    };
+    const warnWalled = (list) => {
+      for (const s of list) {
+        logger(
+          "WARNING",
+          "BLOCKED",
+          `${s} blocked this automated browser window, so you can't sign in here. ` +
+            `Import your ${s} cookies from the browser you normally use instead: ` +
+            `\`canvas-scraper cookies import <export-file> --site ${s}\` (export with a cookie ` +
+            `extension) or \`canvas-scraper cookies import --browser firefox --site ${s}\`.`,
+          0
+        );
+      }
+    };
+
+    let blocked = await walled();
+    warnWalled(blocked);
+    if (blocked.length === sites.length) return { cookies: [], blocked };
+
+    logger(
+      "NOTE",
+      "LOGIN",
+      `A Chrome window has opened at ${sites.filter((s) => !blocked.includes(s)).join(", ")}. ` +
+        "Sign in with your own account (use each site's own Log in / Sign in link).",
+      0
+    );
+    await prompt("When you're signed in, come back here and press Enter to save those cookies...");
+
+    const client = await first.target().createCDPSession();
+    const grab = async () => {
+      const now = await walled();
+      warnWalled(now.filter((s) => !blocked.includes(s)));
+      blocked = now;
+      // A bot wall sets cookies of its own; saving those would make later
+      // scrapes report "session expired", so blocked sites contribute nothing.
+      const ok = sites.filter((s) => !blocked.includes(s));
+      return filterCookiesForSites((await client.send("Network.getAllCookies")).cookies, ok);
+    };
+    let cookies = await grab();
+
+    const missing = sites.filter(
+      (s) => !blocked.includes(s) && !filterCookiesForSites(cookies, [s]).length
+    );
+    if (missing.length) {
+      logger("WARNING", "LOGIN", `No cookies yet for ${missing.join(", ")}.`, 0);
+      await prompt("Finish signing in there, then press Enter to re-check (or Enter to continue)...");
+      cookies = await grab();
+    }
+    return { cookies, blocked };
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+/** Whether a login tab is showing a bot-wall interstitial (not just a short page). */
+async function isBotWalled(tab) {
+  try {
+    const [title, text] = await Promise.all([
+      tab.title().catch(() => ""),
+      tab.evaluate(() => (document.body && document.body.innerText) || ""),
+    ]);
+    // Sign-in pages are often short, so only a recognizable interstitial counts
+    // here — not the "empty page" heuristic used for articles.
+    return detectBotWall({ title, text }).kind === "interstitial";
+  } catch (e) {
+    return false;
+  }
+}
+
 /** Registry of capture strategies. Add new ways to obtain cookies here. */
 export const LOGIN_STRATEGIES = {
   fresh: freshSession,
+  site: siteSession,
 };
 
 export const DEFAULT_LOGIN_MODE = "fresh";
@@ -241,45 +344,47 @@ function askEnter(message) {
   });
 }
 
-/** Keeps only the fields readCookies()/setCookie care about, dropping junk. */
-function normalizeCookies(cookies) {
-  return cookies.map((c) => {
-    const out = {
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path || "/",
-      // CDP uses -1 for session cookies, which is exactly what puppeteer wants.
-      expires: typeof c.expires === "number" ? c.expires : -1,
-      httpOnly: !!c.httpOnly,
-      secure: !!c.secure,
-    };
-    if (VALID_SAME_SITE.has(c.sameSite)) out.sameSite = c.sameSite;
-    return out;
-  });
-}
-
 /**
- * Runs an interactive login and writes the captured cookies to disk.
+ * Runs an interactive login and merges the captured cookies into the jar.
+ * Cookies on domains the capture covers are replaced; everything else already
+ * in the file (e.g. publisher cookies imported earlier) is kept.
  *
- * @param {string} url a Canvas target URL (course URL or bare domain); used to
- *   derive the domain the browser opens at.
+ * @param {string} [url] a Canvas target URL (course URL or bare domain); used
+ *   to derive the domain the browser opens at. Not needed with `sites`.
  * @param {object} [options]
  * @param {string} [options.cookies="cookies.json"] path to write cookies to.
  * @param {string} [options.loginMode="fresh"] which capture strategy to use.
+ * @param {string|string[]} [options.sites] publisher sites to sign in to
+ *   instead of Canvas (selects the "site" strategy).
  * @param {(msg: string) => Promise<void>} [options.prompt] override the "press
  *   Enter" prompt (e.g. for the TUI). Defaults to a terminal readline prompt.
  * @returns {Promise<string>} the path the cookies were written to.
  * @throws {Error} on an unknown mode, an invalid URL, or if nothing was captured.
  */
 export async function runLogin(url, options = {}) {
-  const strategy = getLoginStrategy(options.loginMode);
+  const sites = parseSites(options.sites);
+  const strategy = getLoginStrategy(sites.length ? "site" : options.loginMode);
   const cookiesPath = options.cookies || "cookies.json";
   const prompt = options.prompt || askEnter;
   const logger = (type, name, message, indent, additional) =>
     helpers.print(type, name, message, indent, additional);
 
-  const captured = await strategy({ url, logger, prompt });
+  // Read the existing jar first so an unreadable file fails before the user
+  // spends time signing in.
+  const existing = readJarIfPresent(cookiesPath);
+  // Strategies return cookies[], or { cookies, blocked } when some sites
+  // refused the automated window (see siteSession).
+  const result = await strategy({ url, sites, logger, prompt });
+  const captured = Array.isArray(result) ? result : (result && result.cookies) || [];
+  const blocked = (!Array.isArray(result) && result && result.blocked) || [];
+
+  if (captured.length === 0 && blocked.length) {
+    throw new Error(
+      `${blocked.join(", ")} blocked the automated sign-in window, so no cookies were saved. ` +
+        "Use `canvas-scraper cookies import` with a cookie export from your own browser instead " +
+        `(see the README). ${fs.existsSync(cookiesPath) ? cookiesPath : "The cookies file"} was left untouched.`
+    );
+  }
 
   if (!captured || captured.length === 0) {
     // Don't clobber a possibly-good existing file with nothing.
@@ -292,11 +397,14 @@ export async function runLogin(url, options = {}) {
   }
 
   const normalized = normalizeCookies(captured);
-  fs.writeFileSync(cookiesPath, `${JSON.stringify(normalized, null, 2)}\n`);
+  const merged = mergeCookies(existing, normalized);
+  writeCookies(cookiesPath, merged);
+  const kept = merged.length - normalized.length;
   helpers.print(
     "NOTE",
     "LOGIN",
-    `Saved ${normalized.length} cookie(s) to ${cookiesPath}.`,
+    `Saved ${normalized.length} new cookie(s) to ${cookiesPath}` +
+      (kept > 0 ? ` (kept ${kept} existing cookie(s) for other sites).` : "."),
     0
   );
   return cookiesPath;

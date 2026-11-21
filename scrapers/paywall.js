@@ -40,6 +40,33 @@ export function siteFor(url) {
 }
 
 /**
+ * The skipped-report reason for a paywalled page, telling the user what to do:
+ * with no saved cookies for the site it needs a login; with cookies, the
+ * session has likely expired (or the subscription doesn't cover the article).
+ * @param {{confidence: string, reason: string}} paywall detectPaywall() result
+ * @param {object} ctx
+ * @param {string} ctx.url the article URL
+ * @param {boolean} ctx.hasCookies whether the jar holds cookies for its site
+ * @returns {string}
+ */
+export function paywallReason(paywall, { url, hasCookies }) {
+  const site = siteFor(url);
+  let host = site ? site.domain : "";
+  if (!host) {
+    try {
+      host = new URL(url).hostname.replace(/^www\./, "");
+    } catch (e) {
+      host = "<site>";
+    }
+  }
+  const fix = `canvas-scraper login --site ${host}`;
+  const base = `paywalled (${paywall.confidence}): ${paywall.reason}`;
+  return hasCookies
+    ? `${base} — saved ${host} cookies didn't unlock it (session expired, or not covered by your subscription); re-run \`${fix}\``
+    : `${base} — needs login: no saved ${host} cookies; run \`${fix}\` or \`canvas-scraper cookies import --site ${host}\``;
+}
+
+/**
  * Runs inside the page (puppeteer page.evaluate): collects the raw signals
  * detectPaywall() needs. Kept dependency-free so it serialises cleanly.
  */
