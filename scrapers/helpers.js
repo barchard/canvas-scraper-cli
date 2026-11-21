@@ -745,8 +745,12 @@ const exported = {
 
     let response;
     try {
-      response = await fetch(url, { method: "GET", redirect: "follow" });
+      response = await this.fetchWithTimeout(url, { method: "GET", redirect: "follow" });
     } catch (e) {
+      if (e && e.code === "ETIMEDOUT") {
+        this.print("WARNING", "TIMEOUT", e.message, 1, url);
+        report.recordFailure(url, `timed out: ${e.message}`, { destDir: dir });
+      }
       return false;
     }
     if (!response.ok) return false;
@@ -821,12 +825,16 @@ const exported = {
   async downloadExternalResource(browser, url, dir, index) {
     let response;
     try {
-      response = await fetch(url, {
+      response = await this.fetchWithTimeout(url, {
         method: "GET",
         redirect: "follow",
         headers: { "User-Agent": BROWSER_UA },
       });
     } catch (e) {
+      // A site that holds the connection open without answering (common with
+      // bot protection) used to hang the whole run here. Say so, then let the
+      // browser try it below — it has its own navigation timeout.
+      if (e && e.code === "ETIMEDOUT") this.print("WARNING", "TIMEOUT", `${e.message}; trying it in the browser`, 1, url);
       response = null;
     }
 
@@ -1863,6 +1871,48 @@ const exported = {
     this.fresh = !!on;
   },
 
+  // How long an outside site gets to start responding before we give up on a
+  // request (node-fetch has no default timeout, so one site that holds the
+  // connection open — e.g. behind bot protection — could stall the whole run).
+  externalResponseTimeoutMs: 30000,
+
+  // How long a download may go without receiving any data before it's treated
+  // as stalled and abandoned (see streamToFile).
+  streamIdleTimeoutMs: 60000,
+
+  /**
+   * node-fetch with a deadline for the response headers. The timer is cleared
+   * once headers arrive, so a large body can take as long as it needs (the
+   * stall timeout in streamToFile covers a body that stops arriving).
+   * @param {string} url
+   * @param {object} [options] node-fetch options
+   * @param {number} [ms] deadline in milliseconds
+   * @returns {Promise<object>} the response
+   * @throws {Error} with code "ETIMEDOUT" when the deadline passes
+   */
+  async fetchWithTimeout(url, options = {}, ms = this.externalResponseTimeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        let host = url;
+        try {
+          host = new URL(url).hostname;
+        } catch (err) {
+          /* keep the raw url */
+        }
+        const err = new Error(`no response from ${host} within ${Math.round(ms / 1000)}s`);
+        err.code = "ETIMEDOUT";
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
   // The run's cookie jar, so pages opened outside a Canvas session (external
   // articles) can be given the cookies for their own site. Set/reset by
   // runScrape (like dryRun).
@@ -1938,10 +1988,22 @@ const exported = {
     // then leaves a leftover ".part" — never a truncated file at the real path
     // that a resumed run would mistake for a complete download.
     const tmpPath = filePath + ".part";
+    const idleMs = this.streamIdleTimeoutMs;
     await new Promise((resolve, reject) => {
       const fileStream = fs.createWriteStream(tmpPath);
+      let idle = null;
+      let failed = false;
       const fail = (err) => {
+        if (failed) return;
+        failed = true;
+        clearTimeout(idle);
         // Best-effort cleanup so a failed download doesn't strand a ".part".
+        try {
+          response.body.unpipe(fileStream);
+          response.body.destroy();
+        } catch (e) {
+          /* ignore */
+        }
         try {
           fileStream.destroy();
         } catch (e) {
@@ -1949,8 +2011,21 @@ const exported = {
         }
         fs.rm(tmpPath, { force: true }, () => reject(err));
       };
+      // A server that stops sending mid-download would otherwise hang the run
+      // forever (node-fetch has no timeout), so give up after `idleMs` of
+      // silence. Slow-but-moving downloads keep resetting the timer.
+      const arm = () => {
+        clearTimeout(idle);
+        idle = setTimeout(() => {
+          const e = new Error(`download stalled: no data for ${Math.round(idleMs / 1000)}s`);
+          e.code = "ETIMEDOUT";
+          fail(e);
+        }, idleMs);
+      };
+      arm();
       response.body.on("error", fail);
       response.body.on("data", (chunk) => {
+        arm();
         received += chunk.length;
         const now = Date.now();
         if (now - lastEmit >= 150) {
@@ -1966,7 +2041,10 @@ const exported = {
         }
       });
       fileStream.on("error", fail);
-      fileStream.on("finish", resolve);
+      fileStream.on("finish", () => {
+        clearTimeout(idle);
+        if (!failed) resolve();
+      });
       response.body.pipe(fileStream);
     });
     // Atomic on the same filesystem (tmp is a sibling of the destination).
