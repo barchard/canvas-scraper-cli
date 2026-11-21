@@ -56,7 +56,7 @@ const exported = {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       let page;
       try {
-        page = await browser.newPage();
+        page = await this.openTab(browser);
         if (cookies && cookies.length) await page.setCookie(...cookies);
         const response = await page.goto(url, { timeout: 60000 });
         // A same-document navigation (or a 204/aborted request) yields no
@@ -878,7 +878,7 @@ const exported = {
   async archiveWebpageAsPdf(browser, url, dir, backupName) {
     let page;
     try {
-      page = await browser.newPage();
+      page = await this.openTab(browser);
       // Send the user's saved cookies for this article's own site (e.g. an
       // imported Economist session), so subscribed articles load in full.
       const siteCookies = cookiesForUrl(this.cookieJar, url);
@@ -998,10 +998,19 @@ const exported = {
       }
       return true;
     } catch (e) {
+      // Chrome died: that's not this article's fault. Let it propagate so the
+      // course is relaunched and resumed, rather than reporting every remaining
+      // link as undownloadable.
+      if (this.browserGone(browser)) throw e;
       return false;
     } finally {
       if (page) await page.close().catch(() => {});
     }
+  },
+
+  /** Whether a puppeteer browser has disconnected (crashed or was killed). */
+  browserGone(browser) {
+    return !!browser && typeof browser.isConnected === "function" && !browser.isConnected();
   },
 
   /**
@@ -1784,6 +1793,8 @@ const exported = {
           );
         }
       } catch (e) {
+        // See archiveWebpageAsPdf: a dead browser is a run-level fault.
+        if (this.browserGone(page.browser())) throw e;
         problematic.push(url);
         report.recordFailure(url, e.message || "download error", { destDir: dir });
       }
@@ -1869,6 +1880,70 @@ const exported = {
   /** Turns fresh (wipe-and-rebuild) mode on or off. */
   setFresh(on) {
     this.fresh = !!on;
+  },
+
+  // Backstop for opening a tab. Chrome can be slow to create targets under load
+  // (see launchBrowser's protocolTimeout), so this is generous; the common
+  // failure — Chrome killed or crashed mid-open — is caught at once via the
+  // browser's "disconnected" event instead.
+  openTabTimeoutMs: 300000,
+
+  /**
+   * browser.newPage() that can't hang forever.
+   *
+   * Puppeteer's newPage() waits for the new tab to finish initializing, and that
+   * wait has no timeout. If initialization fails (e.g "Network.enable timed
+   * out", which surfaces as an unhandled rejection) or Chrome is killed while a
+   * tab is opening, the call never settles and the whole scrape stalls. This
+   * rejects as soon as the browser disconnects, or after `ms`, with a message
+   * runScrape recognizes as a browser fault (so it relaunches and resumes). A
+   * tab that finishes opening after we gave up is closed.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms] backstop timeout
+   * @returns {Promise<import("puppeteer").Page>}
+   */
+  openTab(browser, ms = this.openTabTimeoutMs) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+      const off = () => {
+        clearTimeout(timer);
+        if (typeof browser.off === "function") browser.off("disconnected", onDisconnected);
+      };
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        off();
+        reject(err);
+      };
+      const onDisconnected = () =>
+        fail(new Error("Opening a tab failed: Browser has disconnected"));
+
+      if (typeof browser.isConnected === "function" && !browser.isConnected()) {
+        onDisconnected();
+        return;
+      }
+      browser.on("disconnected", onDisconnected);
+      timer = setTimeout(
+        () => fail(new Error(`Opening a tab timed out after ${Math.round(ms / 1000)}s`)),
+        ms
+      );
+      Promise.resolve()
+        .then(() => browser.newPage())
+        .then(
+          (page) => {
+            if (settled) {
+              // We already gave up on this tab; don't leak it.
+              page.close().catch(() => {});
+              return;
+            }
+            settled = true;
+            off();
+            resolve(page);
+          },
+          (err) => fail(err)
+        );
+    });
   },
 
   // How long an outside site gets to start responding before we give up on a

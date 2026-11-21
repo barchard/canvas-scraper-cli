@@ -286,7 +286,7 @@ async function scrapeZoom(browser, cookies, url, dir) {
 
     // 2. Launch it, noting the LTI session id and auth headers from the app's
     //    own API calls.
-    toolPage = await browser.newPage();
+    toolPage = await helpers.openTab(browser);
     if (cookies && cookies.length) await toolPage.setCookie(...cookies);
     let scid = null;
     let apiHeaders = null;
@@ -358,7 +358,7 @@ async function scrapeZoom(browser, cookies, url, dir) {
 
     // 5. Sign in to the institution's Zoom through SSO (once).
     const zoomOrigin = new URL(pending[0].playUrl).origin;
-    playPage = await browser.newPage();
+    playPage = await helpers.openTab(browser);
     if (cookies && cookies.length) await playPage.setCookie(...cookies);
     if (!(await zoomSso(playPage, zoomOrigin))) {
       report.recordFailure(zoomOrigin, "Zoom SSO sign-in failed");
