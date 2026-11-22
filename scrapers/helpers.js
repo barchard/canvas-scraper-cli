@@ -882,6 +882,14 @@ const exported = {
    * @returns {Promise<boolean>}
    */
   async archiveWebpageAsPdf(browser, url, dir, backupName) {
+    // Its site already blocked the automated browser in this run.
+    const site = this.blockedSiteFor(url);
+    if (site) {
+      const reason = this.blockedReason(url);
+      this.print("NOTE", "SKIP", `${site.host} blocked the automated browser earlier in this run — skipping`, 1, url);
+      report.recordFailure(url, reason, { destDir: dir });
+      return false;
+    }
     let page;
     try {
       page = await this.openIsolatedTab(browser);
@@ -929,6 +937,15 @@ const exported = {
         this.print("WARNING", "BLOCKED", reason, 1, url);
         report.recordFailure(url, reason, { destDir: dir });
         this.rememberBlocked(url, reason);
+        if (!this.blockedSiteFor(url)) {
+          this.print(
+            "WARNING",
+            "BLOCKED",
+            `skipping other ${siteHost(url)} links for the rest of this run`,
+            1
+          );
+        }
+        this.rememberBlockedSite(url, reason);
         report.recordDiagnostic({
           kind: "bot-wall",
           url,
@@ -1795,7 +1812,16 @@ const exported = {
       // heavy news pages are what wear Chrome down, so reuse the result.
       const known = this.blockedReason(url);
       if (known) {
-        this.print("NOTE", "SKIP", `already checked this run — ${known}`, 1, url);
+        const site = this.blockedThisRun.has(url) ? null : this.blockedSiteFor(url);
+        this.print(
+          "NOTE",
+          "SKIP",
+          site
+            ? `${site.host} blocked the automated browser earlier in this run — skipping`
+            : `already checked this run — ${known}`,
+          1,
+          url
+        );
         problematic.push(url);
         report.recordFailure(url, known, { destDir: dir });
         continue;
@@ -2065,14 +2091,51 @@ const exported = {
     if (url && reason) this.blockedThisRun.set(url, reason);
   },
 
-  /** The reason `url` was found paywalled or blocked earlier in this run, or "". */
+  // Sites that blocked the automated browser in this run: host -> {reason,
+  // firstUrl}. A bot wall is site-wide, so the site's other links are skipped
+  // for the rest of the run instead of being loaded only to hit the same wall.
+  blockedSites: new Map(),
+
+  /** Remembers that `url`'s site blocked the automated browser. */
+  rememberBlockedSite(url, reason) {
+    const host = siteHost(url);
+    if (host && !this.blockedSites.has(host)) this.blockedSites.set(host, { reason, firstUrl: url });
+  },
+
+  /**
+   * The blocked site `url` belongs to (the same host or a subdomain of it), or
+   * null.
+   * @returns {null | {host: string, reason: string, firstUrl: string}}
+   */
+  blockedSiteFor(url) {
+    const host = siteHost(url);
+    if (!host) return null;
+    for (const [blocked, info] of this.blockedSites) {
+      if (host === blocked || host.endsWith(`.${blocked}`)) return { host: blocked, ...info };
+    }
+    return null;
+  },
+
+  /**
+   * Why `url` can be skipped: it was found paywalled or bot-blocked earlier in
+   * this run, or its site blocked the automated browser. "" if neither.
+   */
   blockedReason(url) {
-    return this.blockedThisRun.get(url) || "";
+    const known = this.blockedThisRun.get(url);
+    if (known) return known;
+    const site = this.blockedSiteFor(url);
+    if (!site) return "";
+    return (
+      `bot-blocked: ${site.host} blocked the automated browser earlier in this run ` +
+      `(${this.shortUrl(site.firstUrl)}), so its other links were skipped — open it in your ` +
+      "own browser, save it as a PDF, and add it with `canvas-scraper import`"
+    );
   },
 
   /** Forgets all remembered outcomes (start of a new run). */
   resetBlocked() {
     this.blockedThisRun.clear();
+    this.blockedSites.clear();
   },
 
   /**

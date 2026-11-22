@@ -86,6 +86,9 @@ flag, no captcha solving). Instead:
   row in `report-skipped.csv` / `dry-run-report.csv`, and a `bot-wall` entry in
   `download-diagnostics.jsonl`. The reason points to saving the page from the
   user's own browser and running `canvas-scraper import`, not to re-logging in.
+- Once a site has bot-walled one link, its other links (same host or a
+  subdomain) are skipped for the rest of the run, each with its own
+  `bot-blocked:` row, so Chrome isn't loading pages only to hit the same wall.
 - `login --site`: a blocked site is reported, its cookies (set by the wall
   itself) are **not** saved, and the user is pointed to `cookies import`.
 - Paywalled articles also get a `[WARNING] PAYWALL` console line now.

@@ -125,3 +125,47 @@ test("untilDisconnected rejects when Chrome goes away, and cancel() removes the 
   dead.isConnected = () => false;
   await assert.rejects(helpers.untilDisconnected(dead).promise, /disconnected/);
 });
+
+test("a bot-blocked site's other links are skipped for the rest of the run", () => {
+  helpers.resetBlocked();
+  const first = "https://www.example.com/news/one";
+  helpers.rememberBlockedSite(first, "bot-blocked: example.com blocked the automated browser");
+
+  // same site, with or without www, and its subdomains
+  for (const u of [
+    "https://www.example.com/news/two",
+    "https://example.com/three",
+    "https://markets.example.com/four",
+  ]) {
+    const site = helpers.blockedSiteFor(u);
+    assert.equal(site && site.host, "example.com", u);
+    assert.match(helpers.blockedReason(u), /example\.com blocked the automated browser earlier in this run/);
+    assert.match(helpers.blockedReason(u), /canvas-scraper import/);
+  }
+
+  // other sites, and look-alike hosts, are not affected
+  assert.equal(helpers.blockedSiteFor("https://www.example.org/x"), null);
+  assert.equal(helpers.blockedSiteFor("https://notexample.com/x"), null);
+  assert.equal(helpers.blockedReason("https://www.example.org/x"), "");
+
+  // a link-specific reason (e.g. the first link's own result) wins
+  helpers.rememberBlocked(first, "bot-blocked: example.com blocked the automated browser (\"just a moment\")");
+  assert.match(helpers.blockedReason(first), /just a moment/);
+
+  helpers.resetBlocked();
+  assert.equal(helpers.blockedSiteFor("https://www.example.com/news/two"), null);
+});
+
+test("archiveWebpageAsPdf skips a blocked site without opening a tab", async () => {
+  helpers.resetBlocked();
+  helpers.rememberBlockedSite("https://www.example.com/a", "bot-blocked: example.com");
+  let opened = false;
+  const b = fakeBrowser();
+  b.createBrowserContext = async () => {
+    opened = true;
+    throw new Error("should not open");
+  };
+  assert.equal(await helpers.archiveWebpageAsPdf(b, "https://www.example.com/b", "/tmp", "x"), false);
+  assert.equal(opened, false);
+  helpers.resetBlocked();
+});

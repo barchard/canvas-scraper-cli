@@ -108,6 +108,7 @@ canvas-scraper cookies import --browser firefox --site economist.com
 
 - `login --site` spots the block, says so, saves nothing for that site, and points you to option 2 (a cookie export from your own browser).
 - During a scrape (and `--dry-run`), a blocked article prints a `[WARNING] BLOCKED` line. It is listed in `report-skipped.csv` / `dry-run-report.csv` with a reason starting `bot-blocked:`, and a `bot-wall` entry with what the scraper saw goes into `download-diagnostics.jsonl`. Imported cookies may not help for these sites. Open the article in your own browser, save it as a PDF, and add it with [`canvas-scraper import`](#manual-import-import).
+- Once a site has blocked the scraper, its other links (including its subdomains) are skipped for the rest of the run. Each one prints `[NOTE] SKIP` and gets its own `bot-blocked:` row in the report naming the link that was blocked first. That way every article you need to save by hand is still listed, without loading each one only to hit the same block. A new run tries the site again.
 
 ### Using Pre-Compiled Release
 
