@@ -4,6 +4,7 @@ import path from "path";
 
 import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
+import waits, { formatWait } from "../scrapers/waits.js";
 import scrapers from "../scrapers/index.js";
 import report from "../scrapers/report.js";
 import manifest from "../scrapers/manifest.js";
@@ -529,7 +530,10 @@ function writeDryRunReport(dir) {
  * @returns {Promise<{outputDir: string, courseCount: number, courseTotal: number, failedCourses: Array<{id: any, name: string, error: string}>, single: boolean}>}
  */
 export async function runScrape(url, options, hooks = {}) {
-  const onProgress = hooks.onProgress || (() => {});
+  const onProgress = (evt) => {
+    waits.noteActivity();
+    if (hooks.onProgress) hooks.onProgress(evt);
+  };
   const emit = (line) =>
     hooks.onLog
       ? hooks.onLog({ type: "INFO", name: "", message: line, line })
@@ -577,6 +581,7 @@ export async function runScrape(url, options, hooks = {}) {
 
   let browser;
   let removeUnhandledListener = () => {};
+  let heartbeat = null;
   // Hoisted so the finally can always write errors.csv, even if the run throws.
   let dir = options.output;
   try {
@@ -586,6 +591,24 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setCookieJar(cookies);
     helpers.resetBlocked();
     process.env.config = JSON.stringify(readJSON("config.json", "config"));
+    for (const w of helpers.setTimeouts(JSON.parse(process.env.config))) {
+      helpers.print("WARNING", "CONFIG", w, 0);
+    }
+    waits.reset();
+    // Plain CLI: the TUI draws its own live timer, so print a heartbeat line
+    // every 30s while something is taking a while, instead of going silent.
+    if (!hooks.onProgress) {
+      let lastBeat = 0;
+      heartbeat = setInterval(() => {
+        const w = waits.describe();
+        const now = Date.now();
+        if (w && w.elapsedMs >= 30000 && now - lastBeat >= 30000) {
+          lastBeat = now;
+          console.log(formatWait(w));
+        }
+      }, 1000);
+      heartbeat.unref?.();
+    }
 
     // opt-in transcription of downloaded videos: config.json transcribeCommand,
     // else auto-detected from the installed transcribers.
@@ -620,7 +643,7 @@ export async function runScrape(url, options, hooks = {}) {
     // Puppeteer's bundled Chromium: the bundled build is pinned to an old
     // version that crashes on launch under newer macOS releases. Fall back to
     // the bundled browser if no local Chrome is found.
-    browser = await launchBrowser();
+    browser = await launchBrowser({ protocolTimeout: helpers.protocolTimeoutMs });
 
     // Puppeteer fires some CDP calls from event handlers nobody awaits, so a
     // rejection from one can't be caught by a try/catch and would crash the
@@ -690,7 +713,9 @@ export async function runScrape(url, options, hooks = {}) {
             e.message
           );
           await browser.close().catch(() => {});
-          browser = await launchBrowser();
+          browser = await waits.track("Chrome to restart", 0, () =>
+            launchBrowser({ protocolTimeout: helpers.protocolTimeoutMs })
+          );
         } finally {
           gone.cancel();
         }
@@ -851,6 +876,7 @@ export async function runScrape(url, options, hooks = {}) {
     emit("*** DONE ***");
     return summary;
   } finally {
+    clearInterval(heartbeat);
     removeUnhandledListener();
     if (browser) await browser.close().catch(() => {});
     // Always flush tracked errors to errors.csv (best-effort). This runs even
@@ -888,6 +914,15 @@ function fmtBytes(n) {
  * prints throttled milestone lines for videos so a large download isn't silent.
  */
 function makeProgressSink(hooks, onProgress) {
+  const sink = makeProgressSinkInner(hooks, onProgress);
+  // A download or transcription that's moving isn't a stall.
+  return (evt) => {
+    waits.noteActivity();
+    return sink(evt);
+  };
+}
+
+function makeProgressSinkInner(hooks, onProgress) {
   if (hooks.onProgress) {
     return (evt) => onProgress({ type: "download", ...evt });
   }

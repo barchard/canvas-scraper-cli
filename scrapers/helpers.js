@@ -11,8 +11,10 @@ import report from "./report.js";
 import manifest from "./manifest.js";
 import { detectPaywall, collectSignals, siteFor, paywallReason } from "./paywall.js";
 import { cookiesForUrl } from "../core/cookieJar.js";
-import { detectBotWall, botWallReason } from "./botwall.js";
+import { detectBotWall, botWallReason, siteHost } from "./botwall.js";
 import { extractMarkdown } from "./articleMarkdown.js";
+import waits from "./waits.js";
+import { resolveTimeouts } from "./timeouts.js";
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -60,7 +62,9 @@ const exported = {
       try {
         page = await this.openTab(browser);
         if (cookies && cookies.length) await page.setCookie(...cookies);
-        const response = await page.goto(url, { timeout: 60000 });
+        const response = await waits.track(`${this.shortUrl(url)} to load`, this.pageLoadTimeoutMs, () =>
+          page.goto(url, { timeout: this.pageLoadTimeoutMs })
+        );
         // A same-document navigation (or a 204/aborted request) yields no
         // response; treat an unknown status as 0 so callers see "not 200"
         // rather than throwing on response.status().
@@ -892,8 +896,10 @@ const exported = {
       // Archive what a reader sees (screen styles), not the print stylesheet.
       await page.emulateMediaType("screen").catch(() => {});
       // Render whatever loads; don't fail the whole thing on a slow idle timeout.
-      const navResponse = await page
-        .goto(url, { waitUntil: "networkidle2", timeout: 30000 })
+      const navResponse = await waits
+        .track(`${siteHost(url) || url} to load`, this.articleLoadTimeoutMs, () =>
+          page.goto(url, { waitUntil: "networkidle2", timeout: this.articleLoadTimeoutMs })
+        )
         .catch(() => null);
 
       let name = "";
@@ -1904,6 +1910,43 @@ const exported = {
   // browser's "disconnected" event instead.
   openTabTimeoutMs: 300000,
 
+  // The rest of the timeouts (see scrapers/timeouts.js; set from config.json
+  // "timeouts" by setTimeouts()).
+  protocolTimeoutMs: 300000,
+  pageLoadTimeoutMs: 60000,
+  articleLoadTimeoutMs: 30000,
+  chromeCheckTimeoutMs: 30000,
+
+  /**
+   * Applies config.json "timeouts" (seconds) over the defaults.
+   * @param {object} config the whole config.json object
+   * @returns {string[]} warnings about settings that were ignored
+   */
+  setTimeouts(config) {
+    const { ms, warnings } = resolveTimeouts(config);
+    this.protocolTimeoutMs = ms.chromeRequest;
+    this.openTabTimeoutMs = ms.openTab;
+    this.pageLoadTimeoutMs = ms.pageLoad;
+    this.articleLoadTimeoutMs = ms.articleLoad;
+    this.externalResponseTimeoutMs = ms.siteResponse;
+    this.streamIdleTimeoutMs = ms.downloadStall;
+    this.chromeCheckTimeoutMs = ms.chromeCheck;
+    waits.idleLimitMs = ms.chromeRequest;
+    return warnings;
+  },
+
+  /** "https://www.example.com/a/very/long/path?x=1" -> "www.example.com/a/very/long/pa…" */
+  shortUrl(url, max = 60) {
+    let s = String(url || "");
+    try {
+      const u = new URL(s);
+      s = u.hostname + u.pathname;
+    } catch (e) {
+      /* keep as is */
+    }
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  },
+
   /**
    * browser.newPage() that can't hang forever.
    *
@@ -1922,8 +1965,10 @@ const exported = {
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
+      const waitId = waits.begin("Chrome to open a tab", ms);
       const off = () => {
         clearTimeout(timer);
+        waits.end(waitId);
         if (typeof browser.off === "function") browser.off("disconnected", onDisconnected);
       };
       const fail = (err) => {
@@ -2037,9 +2082,10 @@ const exported = {
    * @param {number} [ms]
    * @returns {Promise<boolean>}
    */
-  async browserResponds(browser, ms = 30000) {
+  async browserResponds(browser, ms = this.chromeCheckTimeoutMs) {
     if (!browser || this.browserGone(browser)) return false;
     let timer;
+    const waitId = waits.begin("Chrome to answer a health check", ms);
     try {
       return await Promise.race([
         Promise.resolve(browser.version()).then(() => true, () => false),
@@ -2047,6 +2093,7 @@ const exported = {
       ]);
     } finally {
       clearTimeout(timer);
+      waits.end(waitId);
     }
   },
 
@@ -2094,6 +2141,7 @@ const exported = {
   async fetchWithTimeout(url, options = {}, ms = this.externalResponseTimeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
+    const waitId = waits.begin(`${this.shortUrl(url)} to respond`, ms);
     try {
       return await fetch(url, { ...options, signal: controller.signal });
     } catch (e) {
@@ -2111,6 +2159,7 @@ const exported = {
       throw e;
     } finally {
       clearTimeout(timer);
+      waits.end(waitId);
     }
   },
 
@@ -2262,6 +2311,7 @@ const exported = {
 
   print(type, name, message, indent = 0, additional = null) {
     const line = `[${type}]${"  ".repeat(indent)} ${name} | ${message}`;
+    waits.noteActivity(line);
     // Track every error so it can be written to errors.csv and resolved later.
     // Guarded so a bad record never breaks logging.
     if (type === "ERROR") {

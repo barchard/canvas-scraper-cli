@@ -10,6 +10,7 @@ import { runScrape, parseTarget, readCookies, describeCourseSummary } from "../c
 import { runLogin } from "../core/login.js";
 import { launchBrowser } from "../core/browser.js";
 import helpers from "../scrapers/helpers.js";
+import waits, { formatWait } from "../scrapers/waits.js";
 import { retranscribeAll } from "../core/transcribe.js";
 
 // Written with React.createElement (no JSX) so the app needs no build/transform
@@ -876,6 +877,14 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
         )
       : null;
 
+  // A running timer whenever the scraper is waiting on something (a slow site,
+  // a Chrome tab, or nothing visible at all), so a long wait never looks like a
+  // freeze. Re-rendered by the spinner tick.
+  const waitText = !done && step === "scraping" ? formatWait(waits.describe()) : "";
+  const waitLine = waitText
+    ? h(Text, { color: "cyan", wrap: "truncate-end" }, waitText)
+    : null;
+
   // Live download and transcription progress (they run concurrently, so each
   // shows on its own line). Otherwise the big Panopto/video jobs are a single
   // opaque line.
@@ -932,6 +941,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
     h(Box, { marginTop: 1 }, view),
     promptLine,
     courseLine,
+    waitLine,
     downloadLines,
     transcribeLines,
     logBox,

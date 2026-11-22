@@ -245,6 +245,36 @@ slate.
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
 
+### Timeouts and waiting
+
+When the scraper is waiting on something, it shows a running timer instead of going quiet. The terminal UI shows a line such as `⏳ Waiting for www.example.com to load — 0:12 (gives up at 0:30)`. If nothing new has appeared for a while, it shows `⏳ No new output for 1:05 …` along with the last thing it did. On the plain command line, the same message is printed every 30 seconds while a wait lasts.
+
+Every limit can be changed in `config.json` with a `"timeouts"` object, in **seconds**. Leave out any you don't want to change:
+
+```json
+"timeouts": {
+  "chromeRequest": 300,
+  "openTab": 300,
+  "pageLoad": 60,
+  "articleLoad": 30,
+  "siteResponse": 30,
+  "downloadStall": 60,
+  "chromeCheck": 30
+}
+```
+
+| Setting | What it limits | Default |
+| --- | --- | --- |
+| `chromeRequest` | Any single request to Chrome (rendering a PDF, running a script, …) | 300 |
+| `openTab` | Opening a new Chrome tab | 300 |
+| `pageLoad` | Loading a Canvas page | 60 |
+| `articleLoad` | Loading an outside article before saving it as a PDF | 30 |
+| `siteResponse` | An outside site starting to answer a download | 30 |
+| `downloadStall` | A download that stops sending data | 60 |
+| `chromeCheck` | Checking that Chrome still answers before restarting it | 30 |
+
+Raise `chromeRequest` or `pageLoad` on a slow machine or connection. Lower `articleLoad` or `siteResponse` to move past unresponsive news sites faster. Unknown names and values that aren't positive numbers are ignored, with a warning at the start of the run.
+
 ### Terminal UI (`--tui`)
 
 Add `--tui` (or run `npm run tui`) to drive a scrape from an [Ink](https://github.com/vadimdemedes/ink) terminal UI instead of a wall of log lines: a live spinner, the current course and phase (`3/12 — Modules`), a scrolling pane of the most recent log messages, and a final summary. It accepts all the same flags — e.g. `node index.js https://<school_domain> --all --tui` — and falls back to the interactive wizard when no URL is given.
