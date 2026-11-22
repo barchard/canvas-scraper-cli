@@ -2139,6 +2139,47 @@ const exported = {
   },
 
   /**
+   * Closes Chrome without hanging.
+   *
+   * Puppeteer's browser.close() asks Chrome to quit and waits for the answer,
+   * even when Chrome is already gone; that request then sits until
+   * protocolTimeout (5 min). So: a dead Chrome is just disconnected (and its
+   * process killed if it's somehow still there); a live one gets `ms` to close
+   * gracefully before it's killed.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms]
+   */
+  async closeBrowser(browser, ms = 10000) {
+    if (!browser) return;
+    const kill = () => {
+      try {
+        const proc = typeof browser.process === "function" ? browser.process() : null;
+        if (proc && proc.exitCode == null && !proc.killed) proc.kill("SIGKILL");
+      } catch (e) {
+        /* already gone */
+      }
+      try {
+        browser.disconnect?.();
+      } catch (e) {
+        /* already disconnected */
+      }
+    };
+    if (this.browserGone(browser)) {
+      kill();
+      return;
+    }
+    let timer;
+    const closed = await Promise.race([
+      Promise.resolve()
+        .then(() => browser.close())
+        .then(() => true, () => false),
+      new Promise((r) => (timer = setTimeout(() => r(false), ms))),
+    ]);
+    clearTimeout(timer);
+    if (!closed) kill();
+  },
+
+  /**
    * Whether Chrome still answers a trivial request within `ms`. Used to tell a
    * stray timed-out request (Chrome fine) from a Chrome that has hung.
    * @param {import("puppeteer").Browser} browser

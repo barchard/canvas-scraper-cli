@@ -209,7 +209,7 @@ async function freshSession({ url, logger, prompt }) {
     }
     return cookies;
   } finally {
-    await browser.close().catch(() => {});
+    await helpers.closeBrowser(browser);
   }
 }
 
@@ -290,7 +290,7 @@ async function siteSession({ sites, logger, prompt }) {
     }
     return { cookies, blocked };
   } finally {
-    await browser.close().catch(() => {});
+    await helpers.closeBrowser(browser);
   }
 }
 

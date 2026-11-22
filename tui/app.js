@@ -519,7 +519,7 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
             browser = await launchBrowser();
             found = await helpers.listCourses(domain, cookies, browser);
           } finally {
-            if (browser) await browser.close().catch(() => {});
+            if (browser) await helpers.closeBrowser(browser);
           }
         }
       } catch (e) {

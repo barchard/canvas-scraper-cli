@@ -712,7 +712,7 @@ export async function runScrape(url, options, hooks = {}) {
             0,
             e.message
           );
-          await browser.close().catch(() => {});
+          await helpers.closeBrowser(browser);
           browser = await waits.track("Chrome to restart", 0, () =>
             launchBrowser({ protocolTimeout: helpers.protocolTimeoutMs })
           );
@@ -803,7 +803,7 @@ export async function runScrape(url, options, hooks = {}) {
       }
     }
 
-    await browser.close();
+    await helpers.closeBrowser(browser);
     browser = null;
 
     // A dry-run's whole output is the accessibility report; write it and skip the
@@ -878,7 +878,7 @@ export async function runScrape(url, options, hooks = {}) {
   } finally {
     clearInterval(heartbeat);
     removeUnhandledListener();
-    if (browser) await browser.close().catch(() => {});
+    if (browser) await helpers.closeBrowser(browser);
     // Always flush tracked errors to errors.csv (best-effort). This runs even
     // when the scrape threw, so a failed run still leaves a record to resolve.
     writeErrorsReport(dir);

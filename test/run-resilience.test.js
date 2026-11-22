@@ -169,3 +169,43 @@ test("archiveWebpageAsPdf skips a blocked site without opening a tab", async () 
   assert.equal(opened, false);
   helpers.resetBlocked();
 });
+
+test("closeBrowser doesn't wait on a Chrome that's already gone", async () => {
+  const b = fakeBrowser();
+  b.isConnected = () => false;
+  let closeCalled = false;
+  let disconnected = false;
+  b.close = () => {
+    closeCalled = true;
+    return new Promise(() => {}); // puppeteer: waits protocolTimeout
+  };
+  b.disconnect = () => (disconnected = true);
+  b.process = () => null;
+  const started = Date.now();
+  await helpers.closeBrowser(b, 5000);
+  assert.ok(Date.now() - started < 500);
+  assert.equal(closeCalled, false);
+  assert.equal(disconnected, true);
+});
+
+test("closeBrowser kills a live Chrome that won't close in time", async () => {
+  const b = fakeBrowser();
+  let killed = null;
+  b.close = () => new Promise(() => {});
+  b.disconnect = () => {};
+  b.process = () => ({ exitCode: null, killed: false, kill: (sig) => (killed = sig) });
+  await helpers.closeBrowser(b, 50);
+  assert.equal(killed, "SIGKILL");
+});
+
+test("closeBrowser closes a healthy Chrome normally", async () => {
+  const b = fakeBrowser();
+  let closed = false;
+  let killed = false;
+  b.close = async () => (closed = true);
+  b.process = () => ({ exitCode: null, killed: false, kill: () => (killed = true) });
+  await helpers.closeBrowser(b, 1000);
+  assert.equal(closed, true);
+  assert.equal(killed, false);
+  await helpers.closeBrowser(null);
+});
