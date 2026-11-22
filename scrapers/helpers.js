@@ -26,6 +26,8 @@ const BROWSER_UA =
 // Cache of each course's home-page type (default_view), keyed by course URL,
 // so the redirect guard in scrapeSections queries the API at most once/course.
 const courseDefaultViewCache = new Map();
+// Pages opened by openIsolatedTab -> the throwaway browser context they live in.
+const isolatedContexts = new WeakMap();
 
 /** A puppeteer frame's URL, or "" if it can't be read (used for diagnostics). */
 function safeFrameUrl(frame) {
@@ -878,7 +880,7 @@ const exported = {
   async archiveWebpageAsPdf(browser, url, dir, backupName) {
     let page;
     try {
-      page = await this.openTab(browser);
+      page = await this.openIsolatedTab(browser);
       // Send the user's saved cookies for this article's own site (e.g. an
       // imported Economist session), so subscribed articles load in full.
       const siteCookies = cookiesForUrl(this.cookieJar, url);
@@ -920,6 +922,7 @@ const exported = {
         const reason = botWallReason(url, wall);
         this.print("WARNING", "BLOCKED", reason, 1, url);
         report.recordFailure(url, reason, { destDir: dir });
+        this.rememberBlocked(url, reason);
         report.recordDiagnostic({
           kind: "bot-wall",
           url,
@@ -955,6 +958,7 @@ const exported = {
         });
         this.print("WARNING", "PAYWALL", reason, 1, url);
         report.recordFailure(url, reason, { destDir: dir });
+        this.rememberBlocked(url, reason);
         return false;
       }
 
@@ -1004,7 +1008,7 @@ const exported = {
       if (this.browserGone(browser)) throw e;
       return false;
     } finally {
-      if (page) await page.close().catch(() => {});
+      await this.closeTab(page).catch(() => {});
     }
   },
 
@@ -1779,6 +1783,18 @@ const exported = {
         continue;
       }
 
+      // Already found paywalled or bot-blocked earlier in this run (the same
+      // reading linked from an assignment and a module, or a course resumed
+      // after a Chrome restart). Loading it again can't change the answer and
+      // heavy news pages are what wear Chrome down, so reuse the result.
+      const known = this.blockedReason(url);
+      if (known) {
+        this.print("NOTE", "SKIP", `already checked this run — ${known}`, 1, url);
+        problematic.push(url);
+        report.recordFailure(url, known, { destDir: dir });
+        continue;
+      }
+
       try {
         const isVideo = this.isVideoHost(hostname);
         const success = isVideo
@@ -1902,7 +1918,7 @@ const exported = {
    * @param {number} [ms] backstop timeout
    * @returns {Promise<import("puppeteer").Page>}
    */
-  openTab(browser, ms = this.openTabTimeoutMs) {
+  openTab(browser, ms = this.openTabTimeoutMs, open = (b) => b.newPage()) {
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
@@ -1929,12 +1945,12 @@ const exported = {
         ms
       );
       Promise.resolve()
-        .then(() => browser.newPage())
+        .then(() => open(browser))
         .then(
           (page) => {
             if (settled) {
               // We already gave up on this tab; don't leak it.
-              page.close().catch(() => {});
+              this.closeTab(page).catch(() => {});
               return;
             }
             settled = true;
@@ -1944,6 +1960,74 @@ const exported = {
           (err) => fail(err)
         );
     });
+  },
+
+  /**
+   * Like openTab, but in a throwaway browser context (its own cookies, storage,
+   * service workers and helper frames). Closing the tab with closeTab() closes
+   * the whole context, so everything the site started goes with it.
+   *
+   * Used for outside articles: heavy news sites leave service workers, worker
+   * frames and other targets running after their tab closes, and over a long
+   * run those pile up until Chrome stops answering and has to be restarted.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms] backstop timeout
+   * @returns {Promise<import("puppeteer").Page>}
+   */
+  openIsolatedTab(browser, ms = this.openTabTimeoutMs) {
+    return this.openTab(browser, ms, async (b) => {
+      const create =
+        typeof b.createBrowserContext === "function"
+          ? () => b.createBrowserContext()
+          : typeof b.createIncognitoBrowserContext === "function"
+          ? () => b.createIncognitoBrowserContext()
+          : null;
+      if (!create) return b.newPage();
+      const context = await create();
+      try {
+        const page = await context.newPage();
+        isolatedContexts.set(page, context);
+        return page;
+      } catch (e) {
+        await context.close().catch(() => {});
+        throw e;
+      }
+    });
+  },
+
+  /**
+   * Closes a tab from openTab/openIsolatedTab; for an isolated tab, closes its
+   * whole browser context too.
+   * @param {import("puppeteer").Page} page
+   */
+  async closeTab(page) {
+    if (!page) return;
+    const context = isolatedContexts.get(page);
+    isolatedContexts.delete(page);
+    if (context) {
+      await context.close().catch(() => {});
+      return;
+    }
+    await page.close().catch(() => {});
+  },
+
+  // Outside links found paywalled or bot-blocked in this run: url -> reason.
+  // Kept across Chrome restarts; runScrape clears it at the start of a run.
+  blockedThisRun: new Map(),
+
+  /** Remembers that `url` was paywalled or bot-blocked in this run. */
+  rememberBlocked(url, reason) {
+    if (url && reason) this.blockedThisRun.set(url, reason);
+  },
+
+  /** The reason `url` was found paywalled or blocked earlier in this run, or "". */
+  blockedReason(url) {
+    return this.blockedThisRun.get(url) || "";
+  },
+
+  /** Forgets all remembered outcomes (start of a new run). */
+  resetBlocked() {
+    this.blockedThisRun.clear();
   },
 
   // How long an outside site gets to start responding before we give up on a

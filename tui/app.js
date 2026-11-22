@@ -6,7 +6,7 @@ import path from "path";
 import React from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
 
-import { runScrape, parseTarget, readCookies } from "../core/scrape.js";
+import { runScrape, parseTarget, readCookies, describeCourseSummary } from "../core/scrape.js";
 import { runLogin } from "../core/login.js";
 import { launchBrowser } from "../core/browser.js";
 import helpers from "../scrapers/helpers.js";
@@ -912,10 +912,8 @@ function App({ url, options = {}, onFinish, run = runScrape, login = runLogin })
           { flexDirection: "column", marginTop: 1 },
           h(
             Text,
-            { color: "green" },
-            summary.dryRun
-              ? `Dry run complete — probed ${summary.courseCount} course(s), nothing downloaded.`
-              : `Scraped ${summary.courseCount} course(s).`
+            { color: summary.failedCourses && summary.failedCourses.length ? "yellow" : "green" },
+            describeCourseSummary(summary)
           ),
           h(
             Text,

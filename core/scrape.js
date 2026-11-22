@@ -388,6 +388,31 @@ function isBrowserFault(e) {
   );
 }
 
+/**
+ * One-line result for the end of a run, e.g "Scraped 3 of 4 course(s); 1
+ * failed: Global Strategy — see errors.csv". A course that failed still keeps
+ * every file it saved before failing; it's counted as failed because it didn't
+ * finish.
+ * @param {{courseCount: number, courseTotal?: number, failedCourses?: Array<{name: string}>, dryRun?: boolean}} summary
+ * @returns {string}
+ */
+export function describeCourseSummary(summary) {
+  const done = summary.courseCount || 0;
+  const failed = summary.failedCourses || [];
+  const total = summary.courseTotal != null ? summary.courseTotal : done + failed.length;
+  const verb = summary.dryRun ? "Probed" : "Scraped";
+  if (!failed.length) {
+    return summary.dryRun
+      ? `Dry run complete — probed ${done} course(s), nothing downloaded.`
+      : `Scraped ${done} course(s).`;
+  }
+  const names = failed.map((c) => c.name || String(c.id)).join(", ");
+  return (
+    `${verb} ${done} of ${total} course(s); ${failed.length} didn't finish: ${names}. ` +
+    `Files saved before the failure are kept — see errors.csv, then rerun to resume.`
+  );
+}
+
 /** Writes the report CSVs (if --report). Errors are logged, not thrown. */
 function writeReports(dir) {
   try {
@@ -501,7 +526,7 @@ function writeDryRunReport(dir) {
  * @param {object} options scrape options (a/m/q/v/s, all, output, cookies, t,
  *   report, wiki, octarine) — the same shape the CLI/wizard produce
  * @param {object} [hooks] { onLog, onProgress } — optional UI callbacks
- * @returns {Promise<{outputDir: string, courseCount: number, single: boolean}>}
+ * @returns {Promise<{outputDir: string, courseCount: number, courseTotal: number, failedCourses: Array<{id: any, name: string, error: string}>, single: boolean}>}
  */
 export async function runScrape(url, options, hooks = {}) {
   const onProgress = hooks.onProgress || (() => {});
@@ -559,6 +584,7 @@ export async function runScrape(url, options, hooks = {}) {
     const cookies = readCookies(options.cookies);
     // External articles get the cookies for their own site from this jar.
     helpers.setCookieJar(cookies);
+    helpers.resetBlocked();
     process.env.config = JSON.stringify(readJSON("config.json", "config"));
 
     // opt-in transcription of downloaded videos: config.json transcribeCommand,
@@ -645,6 +671,8 @@ export async function runScrape(url, options, hooks = {}) {
     };
 
     let courseCount = 0;
+    let courseTotal = 1;
+    const failedCourses = [];
     if (courseId) {
       // single course -> its own self-contained folder inside the main folder,
       // named after the course (falling back to the id if the name is unavailable).
@@ -693,8 +721,10 @@ export async function runScrape(url, options, hooks = {}) {
           0
         );
         onProgress({ type: "start", mode: "all", total: 0 });
+        courseTotal = 0;
       } else {
         helpers.print("NOTE", "COURSES", `Found ${courses.length} course(s).`, 0);
+        courseTotal = courses.length;
         onProgress({ type: "start", mode: "all", total: courses.length });
         let index = 0;
         const usedFolders = new Set();
@@ -714,6 +744,7 @@ export async function runScrape(url, options, hooks = {}) {
             courseCount++;
           } catch (e) {
             helpers.print("ERROR", "COURSE", `Could not scrape ${c.name} (${c.id})`, 0, e);
+            failedCourses.push({ id: c.id, name: c.name, error: (e && e.message) || String(e) });
           }
           onProgress({ type: "course-end", index, total: courses.length });
         }
@@ -728,7 +759,8 @@ export async function runScrape(url, options, hooks = {}) {
     // to organize).
     if (options.dryRun) {
       writeDryRunReport(dir);
-      const summary = { outputDir: dir, courseCount, single: !!courseId, dryRun: true };
+      const summary = { outputDir: dir, courseCount, courseTotal, failedCourses, single: !!courseId, dryRun: true };
+      if (failedCourses.length) helpers.print("WARNING", "COURSES", describeCourseSummary(summary), 0);
       onProgress({ type: "done", summary });
       emit("*** DONE (dry run — nothing downloaded) ***");
       return summary;
@@ -786,7 +818,8 @@ export async function runScrape(url, options, hooks = {}) {
       }
     }
 
-    const summary = { outputDir: dir, courseCount, single: !!courseId };
+    const summary = { outputDir: dir, courseCount, courseTotal, failedCourses, single: !!courseId };
+    if (failedCourses.length) helpers.print("WARNING", "COURSES", describeCourseSummary(summary), 0);
     onProgress({ type: "done", summary });
     emit("*** DONE ***");
     return summary;
