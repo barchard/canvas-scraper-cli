@@ -622,26 +622,47 @@ export async function runScrape(url, options, hooks = {}) {
     // the bundled browser if no local Chrome is found.
     browser = await launchBrowser();
 
-    // Puppeteer fires some CDP calls from event handlers nobody awaits (e.g.
-    // "Network.enable timed out" while attaching a new tab), so the rejection
-    // can't be caught by a try/catch and would crash the whole process. Catch
-    // it here, kill the wedged Chrome so any in-flight awaits reject instead of
-    // hanging, and let scrapeCourseResilient relaunch and resume the course.
-    const onUnhandled = (reason) => {
+    // Puppeteer fires some CDP calls from event handlers nobody awaits, so a
+    // rejection from one can't be caught by a try/catch and would crash the
+    // whole process. Catch it here.
+    //
+    // Most of these are harmless: a request to a short-lived frame or worker
+    // (ad iframes on news sites) that went away before answering, which
+    // Puppeteer only gives up on after protocolTimeout ("Network.enable timed
+    // out", "Page.addScriptToEvaluateOnNewDocument timed out"). Chrome itself is
+    // fine, so check that it still answers before doing anything drastic. Only
+    // a Chrome that no longer responds is killed, so in-flight awaits reject
+    // and scrapeCourseResilient relaunches and resumes the course.
+    let checkingBrowser = false;
+    const onUnhandled = async (reason) => {
       if (!isBrowserFault(reason)) {
         process.removeListener("unhandledRejection", onUnhandled);
         throw reason; // not ours: restore Node's default crash behaviour
       }
-      helpers.print(
-        "WARNING",
-        "BROWSER",
-        "Chrome stopped responding; restarting it and resuming",
-        0,
-        reason.message
-      );
+      const current = browser;
+      if (!current || checkingBrowser || helpers.browserGone(current)) return;
+      checkingBrowser = true;
       try {
-        browser?.process()?.kill("SIGKILL");
-      } catch {}
+        if (await helpers.browserResponds(current)) {
+          report.recordDiagnostic({
+            kind: "ignored-protocol-timeout",
+            message: (reason && reason.message) || String(reason),
+          });
+          return;
+        }
+        helpers.print(
+          "WARNING",
+          "BROWSER",
+          "Chrome stopped responding; restarting it and resuming",
+          0,
+          reason.message
+        );
+        try {
+          current.process()?.kill("SIGKILL");
+        } catch {}
+      } finally {
+        checkingBrowser = false;
+      }
     };
     process.on("unhandledRejection", onUnhandled);
     removeUnhandledListener = () =>
@@ -653,8 +674,12 @@ export async function runScrape(url, options, hooks = {}) {
     const scrapeCourseResilient = async (...args) => {
       const maxAttempts = 3;
       for (let attempt = 1; ; attempt++) {
+        // If Chrome dies, end this attempt at once. Some Puppeteer calls are
+        // only given up on after protocolTimeout (5 min) when Chrome goes away,
+        // which looked like a hang.
+        const gone = helpers.untilDisconnected(browser);
         try {
-          return await scrapeCourse(browser, ...args);
+          return await Promise.race([scrapeCourse(browser, ...args), gone.promise]);
         } catch (e) {
           if (attempt >= maxAttempts || !isBrowserFault(e)) throw e;
           helpers.print(
@@ -666,6 +691,8 @@ export async function runScrape(url, options, hooks = {}) {
           );
           await browser.close().catch(() => {});
           browser = await launchBrowser();
+        } finally {
+          gone.cancel();
         }
       }
     };

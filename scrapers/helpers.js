@@ -2030,6 +2030,48 @@ const exported = {
     this.blockedThisRun.clear();
   },
 
+  /**
+   * Whether Chrome still answers a trivial request within `ms`. Used to tell a
+   * stray timed-out request (Chrome fine) from a Chrome that has hung.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms]
+   * @returns {Promise<boolean>}
+   */
+  async browserResponds(browser, ms = 30000) {
+    if (!browser || this.browserGone(browser)) return false;
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve(browser.version()).then(() => true, () => false),
+        new Promise((r) => (timer = setTimeout(() => r(false), ms))),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
+   * A promise that rejects with "Browser has disconnected" when Chrome goes
+   * away (at once if it already has), plus cancel() to stop listening.
+   * @param {import("puppeteer").Browser} browser
+   * @returns {{promise: Promise<never>, cancel: () => void}}
+   */
+  untilDisconnected(browser) {
+    let onDisconnected = () => {};
+    const promise = new Promise((_, reject) => {
+      onDisconnected = () => reject(new Error("Browser has disconnected"));
+      if (this.browserGone(browser)) onDisconnected();
+      else browser.on("disconnected", onDisconnected);
+    });
+    promise.catch(() => {}); // only matters while someone races it
+    return {
+      promise,
+      cancel: () => {
+        if (typeof browser.off === "function") browser.off("disconnected", onDisconnected);
+      },
+    };
+  },
+
   // How long an outside site gets to start responding before we give up on a
   // request (node-fetch has no default timeout, so one site that holds the
   // connection open — e.g. behind bot protection — could stall the whole run).

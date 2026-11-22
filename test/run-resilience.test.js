@@ -94,3 +94,34 @@ test("describeCourseSummary: a failed course is named, not just counted as zero"
   assert.match(line, /Scraped 0 of 1 course\(s\); 1 didn't finish: Example Course/);
   assert.match(line, /errors\.csv/);
 });
+
+test("browserResponds: true for a live Chrome, false for a hung or dead one", async () => {
+  const live = fakeBrowser();
+  live.version = async () => "Chrome/1";
+  assert.equal(await helpers.browserResponds(live, 1000), true);
+
+  const hung = fakeBrowser();
+  hung.version = () => new Promise(() => {});
+  const started = Date.now();
+  assert.equal(await helpers.browserResponds(hung, 50), false);
+  assert.ok(Date.now() - started < 1000);
+
+  const dead = fakeBrowser();
+  dead.isConnected = () => false;
+  dead.version = async () => "Chrome/1";
+  assert.equal(await helpers.browserResponds(dead, 1000), false);
+});
+
+test("untilDisconnected rejects when Chrome goes away, and cancel() removes the listener", async () => {
+  const b = fakeBrowser();
+  const gone = helpers.untilDisconnected(b);
+  assert.equal(b.listenerCount("disconnected"), 1);
+  setTimeout(() => b.emit("disconnected"), 10);
+  await assert.rejects(gone.promise, /Browser has disconnected/);
+  gone.cancel();
+  assert.equal(b.listenerCount("disconnected"), 0);
+
+  const dead = fakeBrowser();
+  dead.isConnected = () => false;
+  await assert.rejects(helpers.untilDisconnected(dead).promise, /disconnected/);
+});
