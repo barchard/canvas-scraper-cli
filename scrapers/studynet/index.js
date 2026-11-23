@@ -217,7 +217,7 @@ async function scrapeStudyNet(browser, cookies, url, dir) {
 
     // 2. Launch the tab. Canvas auto-submits a single-use signed LTI form into an
     //    iframe; loading the page live lets Canvas mint a fresh signature.
-    toolPage = await browser.newPage();
+    toolPage = await helpers.openTab(browser);
     if (cookies && cookies.length) await toolPage.setCookie(...cookies);
     await toolPage
       .goto(tabUrl, { waitUntil: "domcontentloaded", timeout: 45000 })

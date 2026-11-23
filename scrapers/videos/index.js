@@ -120,7 +120,7 @@ async function scrapeVideos(browser, cookies, url, dir) {
 
     // 2. Launch the tab. The Panopto LTI page long-polls and never fires "load",
     //    so navigate tolerantly and don't wait for full load.
-    toolPage = await browser.newPage();
+    toolPage = await helpers.openTab(browser);
     if (cookies && cookies.length) await toolPage.setCookie(...cookies);
     await toolPage
       .goto(tabUrl, { waitUntil: "domcontentloaded", timeout: 45000 })

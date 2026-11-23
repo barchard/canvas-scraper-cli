@@ -9,8 +9,12 @@ import { Readable } from "stream";
 
 import report from "./report.js";
 import manifest from "./manifest.js";
-import { detectPaywall, collectSignals, siteFor } from "./paywall.js";
+import { detectPaywall, collectSignals, siteFor, paywallReason } from "./paywall.js";
+import { cookiesForUrl } from "../core/cookieJar.js";
+import { detectBotWall, botWallReason, siteHost } from "./botwall.js";
 import { extractMarkdown } from "./articleMarkdown.js";
+import waits from "./waits.js";
+import { resolveTimeouts } from "./timeouts.js";
 
 let warnedMissingYtDlp = false;
 // Cached path to the Netscape cookie file generated for yt-dlp (built once).
@@ -24,6 +28,8 @@ const BROWSER_UA =
 // Cache of each course's home-page type (default_view), keyed by course URL,
 // so the redirect guard in scrapeSections queries the API at most once/course.
 const courseDefaultViewCache = new Map();
+// Pages opened by openIsolatedTab -> the throwaway browser context they live in.
+const isolatedContexts = new WeakMap();
 
 /** A puppeteer frame's URL, or "" if it can't be read (used for diagnostics). */
 function safeFrameUrl(frame) {
@@ -54,9 +60,11 @@ const exported = {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       let page;
       try {
-        page = await browser.newPage();
+        page = await this.openTab(browser);
         if (cookies && cookies.length) await page.setCookie(...cookies);
-        const response = await page.goto(url, { timeout: 60000 });
+        const response = await waits.track(`${this.shortUrl(url)} to load`, this.pageLoadTimeoutMs, () =>
+          page.goto(url, { timeout: this.pageLoadTimeoutMs })
+        );
         // A same-document navigation (or a 204/aborted request) yields no
         // response; treat an unknown status as 0 so callers see "not 200"
         // rather than throwing on response.status().
@@ -743,8 +751,12 @@ const exported = {
 
     let response;
     try {
-      response = await fetch(url, { method: "GET", redirect: "follow" });
+      response = await this.fetchWithTimeout(url, { method: "GET", redirect: "follow" });
     } catch (e) {
+      if (e && e.code === "ETIMEDOUT") {
+        this.print("WARNING", "TIMEOUT", e.message, 1, url);
+        report.recordFailure(url, `timed out: ${e.message}`, { destDir: dir });
+      }
       return false;
     }
     if (!response.ok) return false;
@@ -819,12 +831,16 @@ const exported = {
   async downloadExternalResource(browser, url, dir, index) {
     let response;
     try {
-      response = await fetch(url, {
+      response = await this.fetchWithTimeout(url, {
         method: "GET",
         redirect: "follow",
         headers: { "User-Agent": BROWSER_UA },
       });
     } catch (e) {
+      // A site that holds the connection open without answering (common with
+      // bot protection) used to hang the whole run here. Say so, then let the
+      // browser try it below — it has its own navigation timeout.
+      if (e && e.code === "ETIMEDOUT") this.print("WARNING", "TIMEOUT", `${e.message}; trying it in the browser`, 1, url);
       response = null;
     }
 
@@ -866,9 +882,21 @@ const exported = {
    * @returns {Promise<boolean>}
    */
   async archiveWebpageAsPdf(browser, url, dir, backupName) {
+    // Its site already blocked the automated browser in this run.
+    const site = this.blockedSiteFor(url);
+    if (site) {
+      const reason = this.blockedReason(url);
+      this.print("NOTE", "SKIP", `${site.host} blocked the automated browser earlier in this run — skipping`, 1, url);
+      report.recordFailure(url, reason, { destDir: dir });
+      return false;
+    }
     let page;
     try {
-      page = await browser.newPage();
+      page = await this.openIsolatedTab(browser);
+      // Send the user's saved cookies for this article's own site (e.g. an
+      // imported Economist session), so subscribed articles load in full.
+      const siteCookies = cookiesForUrl(this.cookieJar, url);
+      if (siteCookies.length) await page.setCookie(...siteCookies).catch(() => {});
       await page.setViewport({ width: 1280, height: 900 });
       // Present a normal browser UA; the default headless UA ("HeadlessChrome")
       // is blocked by some sites (e.g nytimes.com).
@@ -876,8 +904,10 @@ const exported = {
       // Archive what a reader sees (screen styles), not the print stylesheet.
       await page.emulateMediaType("screen").catch(() => {});
       // Render whatever loads; don't fail the whole thing on a slow idle timeout.
-      const navResponse = await page
-        .goto(url, { waitUntil: "networkidle2", timeout: 30000 })
+      const navResponse = await waits
+        .track(`${siteHost(url) || url} to load`, this.articleLoadTimeoutMs, () =>
+          page.goto(url, { waitUntil: "networkidle2", timeout: this.articleLoadTimeoutMs })
+        )
         .catch(() => null);
 
       let name = "";
@@ -887,12 +917,12 @@ const exported = {
         // ignore
       }
 
-      // Detect a blocked render. Bot-walled sites (nytimes.com, bloomberg.com,
-      // Cloudflare, DataDome, ...) either serve an empty/near-empty page or a
-      // recognizable interstitial ("Are you a robot?", "Just a moment...",
-      // "enable JavaScript", a captcha). Archiving those produces a junk PDF
-      // that masquerades as the article, so report a failure and let the URL
-      // surface in the skipped report instead.
+      // Detect a blocked render. Bot-walled sites (The Economist, Cloudflare,
+      // DataDome, ...) serve an empty page or a recognizable interstitial
+      // ("Access is temporarily restricted", "Are you a robot?", a captcha).
+      // Archiving those produces a junk PDF that masquerades as the article, so
+      // warn on the console and record the reason for report-skipped.csv (and
+      // the dry-run report). We never try to get past the wall.
       let bodyText = "";
       try {
         bodyText = await page.evaluate(
@@ -901,22 +931,30 @@ const exported = {
       } catch (e) {
         // ignore
       }
-      const len = bodyText.trim().length;
-      // Strip the passive "protected by reCAPTCHA/hCaptcha" notice that many
-      // legitimate sites embed on newsletter and comment forms (e.g The
-      // Atlantic's footer). It is not a bot challenge, and letting the bare
-      // "captcha" keyword match it discards a perfectly good archive.
-      const probe = `${name}\n${bodyText}`
-        .toLowerCase()
-        .replace(/protected by (?:google )?(?:re)?captcha|protected by hcaptcha/g, "");
-      // A real bot wall serves a near-empty page or a short interstitial, so only
-      // trust an interstitial keyword on a short page. A full-length article that
-      // mentions one of these phrases in passing (e.g a course reading *about*
-      // CAPTCHAs or bot detection) is not blocked.
-      const interstitial =
-        /are you a robot|just a moment|access (?:to this page has been )?denied|enable javascript|please enable (?:js|cookies)|verify you are (?:a )?human|captcha|unusual traffic|request (?:was )?blocked/;
-      const blocked = len < 200 || (len < 1000 && interstitial.test(probe));
-      if (blocked) {
+      const wall = detectBotWall({ title: name, text: bodyText });
+      if (wall.blocked) {
+        const reason = botWallReason(url, wall);
+        this.print("WARNING", "BLOCKED", reason, 1, url);
+        report.recordFailure(url, reason, { destDir: dir });
+        this.rememberBlocked(url, reason);
+        if (!this.blockedSiteFor(url)) {
+          this.print(
+            "WARNING",
+            "BLOCKED",
+            `skipping other ${siteHost(url)} links for the rest of this run`,
+            1
+          );
+        }
+        this.rememberBlockedSite(url, reason);
+        report.recordDiagnostic({
+          kind: "bot-wall",
+          url,
+          finalUrl: page.url(),
+          status: navResponse ? navResponse.status() : 0,
+          title: name,
+          wall: wall.kind,
+          match: wall.match,
+        });
         return false;
       }
 
@@ -937,11 +975,13 @@ const exported = {
         // detection is best-effort; fall through and archive as before
       }
       if (paywall.paywalled) {
-        report.recordFailure(
+        const reason = paywallReason(paywall, {
           url,
-          `paywalled (${paywall.confidence}): ${paywall.reason}`,
-          { destDir: dir }
-        );
+          hasCookies: cookiesForUrl(this.cookieJar, url).length > 0,
+        });
+        this.print("WARNING", "PAYWALL", reason, 1, url);
+        report.recordFailure(url, reason, { destDir: dir });
+        this.rememberBlocked(url, reason);
         return false;
       }
 
@@ -985,10 +1025,19 @@ const exported = {
       }
       return true;
     } catch (e) {
+      // Chrome died: that's not this article's fault. Let it propagate so the
+      // course is relaunched and resumed, rather than reporting every remaining
+      // link as undownloadable.
+      if (this.browserGone(browser)) throw e;
       return false;
     } finally {
-      if (page) await page.close().catch(() => {});
+      await this.closeTab(page).catch(() => {});
     }
+  },
+
+  /** Whether a puppeteer browser has disconnected (crashed or was killed). */
+  browserGone(browser) {
+    return !!browser && typeof browser.isConnected === "function" && !browser.isConnected();
   },
 
   /**
@@ -1757,6 +1806,27 @@ const exported = {
         continue;
       }
 
+      // Already found paywalled or bot-blocked earlier in this run (the same
+      // reading linked from an assignment and a module, or a course resumed
+      // after a Chrome restart). Loading it again can't change the answer and
+      // heavy news pages are what wear Chrome down, so reuse the result.
+      const known = this.blockedReason(url);
+      if (known) {
+        const site = this.blockedThisRun.has(url) ? null : this.blockedSiteFor(url);
+        this.print(
+          "NOTE",
+          "SKIP",
+          site
+            ? `${site.host} blocked the automated browser earlier in this run — skipping`
+            : `already checked this run — ${known}`,
+          1,
+          url
+        );
+        problematic.push(url);
+        report.recordFailure(url, known, { destDir: dir });
+        continue;
+      }
+
       try {
         const isVideo = this.isVideoHost(hostname);
         const success = isVideo
@@ -1771,6 +1841,8 @@ const exported = {
           );
         }
       } catch (e) {
+        // See archiveWebpageAsPdf: a dead browser is a run-level fault.
+        if (this.browserGone(page.browser())) throw e;
         problematic.push(url);
         report.recordFailure(url, e.message || "download error", { destDir: dir });
       }
@@ -1858,6 +1930,353 @@ const exported = {
     this.fresh = !!on;
   },
 
+  // Backstop for opening a tab. Chrome can be slow to create targets under load
+  // (see launchBrowser's protocolTimeout), so this is generous; the common
+  // failure — Chrome killed or crashed mid-open — is caught at once via the
+  // browser's "disconnected" event instead.
+  openTabTimeoutMs: 300000,
+
+  // The rest of the timeouts (see scrapers/timeouts.js; set from config.json
+  // "timeouts" by setTimeouts()).
+  protocolTimeoutMs: 300000,
+  pageLoadTimeoutMs: 60000,
+  articleLoadTimeoutMs: 30000,
+  chromeCheckTimeoutMs: 30000,
+
+  /**
+   * Applies config.json "timeouts" (seconds) over the defaults.
+   * @param {object} config the whole config.json object
+   * @returns {string[]} warnings about settings that were ignored
+   */
+  setTimeouts(config) {
+    const { ms, warnings } = resolveTimeouts(config);
+    this.protocolTimeoutMs = ms.chromeRequest;
+    this.openTabTimeoutMs = ms.openTab;
+    this.pageLoadTimeoutMs = ms.pageLoad;
+    this.articleLoadTimeoutMs = ms.articleLoad;
+    this.externalResponseTimeoutMs = ms.siteResponse;
+    this.streamIdleTimeoutMs = ms.downloadStall;
+    this.chromeCheckTimeoutMs = ms.chromeCheck;
+    waits.idleLimitMs = ms.chromeRequest;
+    return warnings;
+  },
+
+  /** "https://www.example.com/a/very/long/path?x=1" -> "www.example.com/a/very/long/pa…" */
+  shortUrl(url, max = 60) {
+    let s = String(url || "");
+    try {
+      const u = new URL(s);
+      s = u.hostname + u.pathname;
+    } catch (e) {
+      /* keep as is */
+    }
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  },
+
+  /**
+   * browser.newPage() that can't hang forever.
+   *
+   * Puppeteer's newPage() waits for the new tab to finish initializing, and that
+   * wait has no timeout. If initialization fails (e.g "Network.enable timed
+   * out", which surfaces as an unhandled rejection) or Chrome is killed while a
+   * tab is opening, the call never settles and the whole scrape stalls. This
+   * rejects as soon as the browser disconnects, or after `ms`, with a message
+   * runScrape recognizes as a browser fault (so it relaunches and resumes). A
+   * tab that finishes opening after we gave up is closed.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms] backstop timeout
+   * @returns {Promise<import("puppeteer").Page>}
+   */
+  openTab(browser, ms = this.openTabTimeoutMs, open = (b) => b.newPage()) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+      const waitId = waits.begin("Chrome to open a tab", ms);
+      const off = () => {
+        clearTimeout(timer);
+        waits.end(waitId);
+        if (typeof browser.off === "function") browser.off("disconnected", onDisconnected);
+      };
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        off();
+        reject(err);
+      };
+      const onDisconnected = () =>
+        fail(new Error("Opening a tab failed: Browser has disconnected"));
+
+      if (typeof browser.isConnected === "function" && !browser.isConnected()) {
+        onDisconnected();
+        return;
+      }
+      browser.on("disconnected", onDisconnected);
+      timer = setTimeout(
+        () => fail(new Error(`Opening a tab timed out after ${Math.round(ms / 1000)}s`)),
+        ms
+      );
+      Promise.resolve()
+        .then(() => open(browser))
+        .then(
+          (page) => {
+            if (settled) {
+              // We already gave up on this tab; don't leak it.
+              this.closeTab(page).catch(() => {});
+              return;
+            }
+            settled = true;
+            off();
+            resolve(page);
+          },
+          (err) => fail(err)
+        );
+    });
+  },
+
+  /**
+   * Like openTab, but in a throwaway browser context (its own cookies, storage,
+   * service workers and helper frames). Closing the tab with closeTab() closes
+   * the whole context, so everything the site started goes with it.
+   *
+   * Used for outside articles: heavy news sites leave service workers, worker
+   * frames and other targets running after their tab closes, and over a long
+   * run those pile up until Chrome stops answering and has to be restarted.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms] backstop timeout
+   * @returns {Promise<import("puppeteer").Page>}
+   */
+  openIsolatedTab(browser, ms = this.openTabTimeoutMs) {
+    return this.openTab(browser, ms, async (b) => {
+      const create =
+        typeof b.createBrowserContext === "function"
+          ? () => b.createBrowserContext()
+          : typeof b.createIncognitoBrowserContext === "function"
+          ? () => b.createIncognitoBrowserContext()
+          : null;
+      if (!create) return b.newPage();
+      const context = await create();
+      try {
+        const page = await context.newPage();
+        isolatedContexts.set(page, context);
+        return page;
+      } catch (e) {
+        await context.close().catch(() => {});
+        throw e;
+      }
+    });
+  },
+
+  /**
+   * Closes a tab from openTab/openIsolatedTab; for an isolated tab, closes its
+   * whole browser context too.
+   * @param {import("puppeteer").Page} page
+   */
+  async closeTab(page) {
+    if (!page) return;
+    const context = isolatedContexts.get(page);
+    isolatedContexts.delete(page);
+    if (context) {
+      await context.close().catch(() => {});
+      return;
+    }
+    await page.close().catch(() => {});
+  },
+
+  // Outside links found paywalled or bot-blocked in this run: url -> reason.
+  // Kept across Chrome restarts; runScrape clears it at the start of a run.
+  blockedThisRun: new Map(),
+
+  /** Remembers that `url` was paywalled or bot-blocked in this run. */
+  rememberBlocked(url, reason) {
+    if (url && reason) this.blockedThisRun.set(url, reason);
+  },
+
+  // Sites that blocked the automated browser in this run: host -> {reason,
+  // firstUrl}. A bot wall is site-wide, so the site's other links are skipped
+  // for the rest of the run instead of being loaded only to hit the same wall.
+  blockedSites: new Map(),
+
+  /** Remembers that `url`'s site blocked the automated browser. */
+  rememberBlockedSite(url, reason) {
+    const host = siteHost(url);
+    if (host && !this.blockedSites.has(host)) this.blockedSites.set(host, { reason, firstUrl: url });
+  },
+
+  /**
+   * The blocked site `url` belongs to (the same host or a subdomain of it), or
+   * null.
+   * @returns {null | {host: string, reason: string, firstUrl: string}}
+   */
+  blockedSiteFor(url) {
+    const host = siteHost(url);
+    if (!host) return null;
+    for (const [blocked, info] of this.blockedSites) {
+      if (host === blocked || host.endsWith(`.${blocked}`)) return { host: blocked, ...info };
+    }
+    return null;
+  },
+
+  /**
+   * Why `url` can be skipped: it was found paywalled or bot-blocked earlier in
+   * this run, or its site blocked the automated browser. "" if neither.
+   */
+  blockedReason(url) {
+    const known = this.blockedThisRun.get(url);
+    if (known) return known;
+    const site = this.blockedSiteFor(url);
+    if (!site) return "";
+    return (
+      `bot-blocked: ${site.host} blocked the automated browser earlier in this run ` +
+      `(${this.shortUrl(site.firstUrl)}), so its other links were skipped — open it in your ` +
+      "own browser, save it as a PDF, and add it with `canvas-scraper import`"
+    );
+  },
+
+  /** Forgets all remembered outcomes (start of a new run). */
+  resetBlocked() {
+    this.blockedThisRun.clear();
+    this.blockedSites.clear();
+  },
+
+  /**
+   * Closes Chrome without hanging.
+   *
+   * Puppeteer's browser.close() asks Chrome to quit and waits for the answer,
+   * even when Chrome is already gone; that request then sits until
+   * protocolTimeout (5 min). So: a dead Chrome is just disconnected (and its
+   * process killed if it's somehow still there); a live one gets `ms` to close
+   * gracefully before it's killed.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms]
+   */
+  async closeBrowser(browser, ms = 10000) {
+    if (!browser) return;
+    const kill = () => {
+      try {
+        const proc = typeof browser.process === "function" ? browser.process() : null;
+        if (proc && proc.exitCode == null && !proc.killed) proc.kill("SIGKILL");
+      } catch (e) {
+        /* already gone */
+      }
+      try {
+        browser.disconnect?.();
+      } catch (e) {
+        /* already disconnected */
+      }
+    };
+    if (this.browserGone(browser)) {
+      kill();
+      return;
+    }
+    let timer;
+    const closed = await Promise.race([
+      Promise.resolve()
+        .then(() => browser.close())
+        .then(() => true, () => false),
+      new Promise((r) => (timer = setTimeout(() => r(false), ms))),
+    ]);
+    clearTimeout(timer);
+    if (!closed) kill();
+  },
+
+  /**
+   * Whether Chrome still answers a trivial request within `ms`. Used to tell a
+   * stray timed-out request (Chrome fine) from a Chrome that has hung.
+   * @param {import("puppeteer").Browser} browser
+   * @param {number} [ms]
+   * @returns {Promise<boolean>}
+   */
+  async browserResponds(browser, ms = this.chromeCheckTimeoutMs) {
+    if (!browser || this.browserGone(browser)) return false;
+    let timer;
+    const waitId = waits.begin("Chrome to answer a health check", ms);
+    try {
+      return await Promise.race([
+        Promise.resolve(browser.version()).then(() => true, () => false),
+        new Promise((r) => (timer = setTimeout(() => r(false), ms))),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      waits.end(waitId);
+    }
+  },
+
+  /**
+   * A promise that rejects with "Browser has disconnected" when Chrome goes
+   * away (at once if it already has), plus cancel() to stop listening.
+   * @param {import("puppeteer").Browser} browser
+   * @returns {{promise: Promise<never>, cancel: () => void}}
+   */
+  untilDisconnected(browser) {
+    let onDisconnected = () => {};
+    const promise = new Promise((_, reject) => {
+      onDisconnected = () => reject(new Error("Browser has disconnected"));
+      if (this.browserGone(browser)) onDisconnected();
+      else browser.on("disconnected", onDisconnected);
+    });
+    promise.catch(() => {}); // only matters while someone races it
+    return {
+      promise,
+      cancel: () => {
+        if (typeof browser.off === "function") browser.off("disconnected", onDisconnected);
+      },
+    };
+  },
+
+  // How long an outside site gets to start responding before we give up on a
+  // request (node-fetch has no default timeout, so one site that holds the
+  // connection open — e.g. behind bot protection — could stall the whole run).
+  externalResponseTimeoutMs: 30000,
+
+  // How long a download may go without receiving any data before it's treated
+  // as stalled and abandoned (see streamToFile).
+  streamIdleTimeoutMs: 60000,
+
+  /**
+   * node-fetch with a deadline for the response headers. The timer is cleared
+   * once headers arrive, so a large body can take as long as it needs (the
+   * stall timeout in streamToFile covers a body that stops arriving).
+   * @param {string} url
+   * @param {object} [options] node-fetch options
+   * @param {number} [ms] deadline in milliseconds
+   * @returns {Promise<object>} the response
+   * @throws {Error} with code "ETIMEDOUT" when the deadline passes
+   */
+  async fetchWithTimeout(url, options = {}, ms = this.externalResponseTimeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    const waitId = waits.begin(`${this.shortUrl(url)} to respond`, ms);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        let host = url;
+        try {
+          host = new URL(url).hostname;
+        } catch (err) {
+          /* keep the raw url */
+        }
+        const err = new Error(`no response from ${host} within ${Math.round(ms / 1000)}s`);
+        err.code = "ETIMEDOUT";
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      waits.end(waitId);
+    }
+  },
+
+  // The run's cookie jar, so pages opened outside a Canvas session (external
+  // articles) can be given the cookies for their own site. Set/reset by
+  // runScrape (like dryRun).
+  cookieJar: [],
+
+  /** Sets the cookies available to external-article fetches. */
+  setCookieJar(cookies) {
+    this.cookieJar = Array.isArray(cookies) ? cookies : [];
+  },
+
   /**
    * Captures a page as a PDF, or — in dry-run — probes the page's accessibility
    * and records it instead of writing anything. Every scraper that would save a
@@ -1923,10 +2342,22 @@ const exported = {
     // then leaves a leftover ".part" — never a truncated file at the real path
     // that a resumed run would mistake for a complete download.
     const tmpPath = filePath + ".part";
+    const idleMs = this.streamIdleTimeoutMs;
     await new Promise((resolve, reject) => {
       const fileStream = fs.createWriteStream(tmpPath);
+      let idle = null;
+      let failed = false;
       const fail = (err) => {
+        if (failed) return;
+        failed = true;
+        clearTimeout(idle);
         // Best-effort cleanup so a failed download doesn't strand a ".part".
+        try {
+          response.body.unpipe(fileStream);
+          response.body.destroy();
+        } catch (e) {
+          /* ignore */
+        }
         try {
           fileStream.destroy();
         } catch (e) {
@@ -1934,8 +2365,21 @@ const exported = {
         }
         fs.rm(tmpPath, { force: true }, () => reject(err));
       };
+      // A server that stops sending mid-download would otherwise hang the run
+      // forever (node-fetch has no timeout), so give up after `idleMs` of
+      // silence. Slow-but-moving downloads keep resetting the timer.
+      const arm = () => {
+        clearTimeout(idle);
+        idle = setTimeout(() => {
+          const e = new Error(`download stalled: no data for ${Math.round(idleMs / 1000)}s`);
+          e.code = "ETIMEDOUT";
+          fail(e);
+        }, idleMs);
+      };
+      arm();
       response.body.on("error", fail);
       response.body.on("data", (chunk) => {
+        arm();
         received += chunk.length;
         const now = Date.now();
         if (now - lastEmit >= 150) {
@@ -1951,7 +2395,10 @@ const exported = {
         }
       });
       fileStream.on("error", fail);
-      fileStream.on("finish", resolve);
+      fileStream.on("finish", () => {
+        clearTimeout(idle);
+        if (!failed) resolve();
+      });
       response.body.pipe(fileStream);
     });
     // Atomic on the same filesystem (tmp is a sibling of the destination).
@@ -1968,6 +2415,7 @@ const exported = {
 
   print(type, name, message, indent = 0, additional = null) {
     const line = `[${type}]${"  ".repeat(indent)} ${name} | ${message}`;
+    waits.noteActivity(line);
     // Track every error so it can be written to errors.csv and resolved later.
     // Guarded so a bad record never breaks logging.
     if (type === "ERROR") {

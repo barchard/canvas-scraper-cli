@@ -4,6 +4,7 @@ import path from "path";
 
 import { launchBrowser } from "./browser.js";
 import helpers from "../scrapers/helpers.js";
+import waits, { formatWait } from "../scrapers/waits.js";
 import scrapers from "../scrapers/index.js";
 import report from "../scrapers/report.js";
 import manifest from "../scrapers/manifest.js";
@@ -388,6 +389,31 @@ function isBrowserFault(e) {
   );
 }
 
+/**
+ * One-line result for the end of a run, e.g "Scraped 3 of 4 course(s); 1
+ * failed: Global Strategy — see errors.csv". A course that failed still keeps
+ * every file it saved before failing; it's counted as failed because it didn't
+ * finish.
+ * @param {{courseCount: number, courseTotal?: number, failedCourses?: Array<{name: string}>, dryRun?: boolean}} summary
+ * @returns {string}
+ */
+export function describeCourseSummary(summary) {
+  const done = summary.courseCount || 0;
+  const failed = summary.failedCourses || [];
+  const total = summary.courseTotal != null ? summary.courseTotal : done + failed.length;
+  const verb = summary.dryRun ? "Probed" : "Scraped";
+  if (!failed.length) {
+    return summary.dryRun
+      ? `Dry run complete — probed ${done} course(s), nothing downloaded.`
+      : `Scraped ${done} course(s).`;
+  }
+  const names = failed.map((c) => c.name || String(c.id)).join(", ");
+  return (
+    `${verb} ${done} of ${total} course(s); ${failed.length} didn't finish: ${names}. ` +
+    `Files saved before the failure are kept — see errors.csv, then rerun to resume.`
+  );
+}
+
 /** Writes the report CSVs (if --report). Errors are logged, not thrown. */
 function writeReports(dir) {
   try {
@@ -501,10 +527,13 @@ function writeDryRunReport(dir) {
  * @param {object} options scrape options (a/m/q/v/s, all, output, cookies, t,
  *   report, wiki, octarine) — the same shape the CLI/wizard produce
  * @param {object} [hooks] { onLog, onProgress } — optional UI callbacks
- * @returns {Promise<{outputDir: string, courseCount: number, single: boolean}>}
+ * @returns {Promise<{outputDir: string, courseCount: number, courseTotal: number, failedCourses: Array<{id: any, name: string, error: string}>, single: boolean}>}
  */
 export async function runScrape(url, options, hooks = {}) {
-  const onProgress = hooks.onProgress || (() => {});
+  const onProgress = (evt) => {
+    waits.noteActivity();
+    if (hooks.onProgress) hooks.onProgress(evt);
+  };
   const emit = (line) =>
     hooks.onLog
       ? hooks.onLog({ type: "INFO", name: "", message: line, line })
@@ -532,6 +561,9 @@ export async function runScrape(url, options, hooks = {}) {
   const prevFresh = helpers.fresh;
   helpers.setFresh(!!options.fresh);
 
+  // Restored in the finally; set once the cookies file has been read.
+  const prevCookieJar = helpers.cookieJar;
+
   // --force re-downloads assets the manifest already marks complete (in case an
   // on-disk file is suspected corrupt); the default trusts the manifest.
   const prevForce = manifest.force;
@@ -549,12 +581,34 @@ export async function runScrape(url, options, hooks = {}) {
 
   let browser;
   let removeUnhandledListener = () => {};
+  let heartbeat = null;
   // Hoisted so the finally can always write errors.csv, even if the run throws.
   let dir = options.output;
   try {
     const { domain, courseId } = parseTarget(url);
     const cookies = readCookies(options.cookies);
+    // External articles get the cookies for their own site from this jar.
+    helpers.setCookieJar(cookies);
+    helpers.resetBlocked();
     process.env.config = JSON.stringify(readJSON("config.json", "config"));
+    for (const w of helpers.setTimeouts(JSON.parse(process.env.config))) {
+      helpers.print("WARNING", "CONFIG", w, 0);
+    }
+    waits.reset();
+    // Plain CLI: the TUI draws its own live timer, so print a heartbeat line
+    // every 30s while something is taking a while, instead of going silent.
+    if (!hooks.onProgress) {
+      let lastBeat = 0;
+      heartbeat = setInterval(() => {
+        const w = waits.describe();
+        const now = Date.now();
+        if (w && w.elapsedMs >= 30000 && now - lastBeat >= 30000) {
+          lastBeat = now;
+          console.log(formatWait(w));
+        }
+      }, 1000);
+      heartbeat.unref?.();
+    }
 
     // opt-in transcription of downloaded videos: config.json transcribeCommand,
     // else auto-detected from the installed transcribers.
@@ -589,28 +643,49 @@ export async function runScrape(url, options, hooks = {}) {
     // Puppeteer's bundled Chromium: the bundled build is pinned to an old
     // version that crashes on launch under newer macOS releases. Fall back to
     // the bundled browser if no local Chrome is found.
-    browser = await launchBrowser();
+    browser = await launchBrowser({ protocolTimeout: helpers.protocolTimeoutMs });
 
-    // Puppeteer fires some CDP calls from event handlers nobody awaits (e.g.
-    // "Network.enable timed out" while attaching a new tab), so the rejection
-    // can't be caught by a try/catch and would crash the whole process. Catch
-    // it here, kill the wedged Chrome so any in-flight awaits reject instead of
-    // hanging, and let scrapeCourseResilient relaunch and resume the course.
-    const onUnhandled = (reason) => {
+    // Puppeteer fires some CDP calls from event handlers nobody awaits, so a
+    // rejection from one can't be caught by a try/catch and would crash the
+    // whole process. Catch it here.
+    //
+    // Most of these are harmless: a request to a short-lived frame or worker
+    // (ad iframes on news sites) that went away before answering, which
+    // Puppeteer only gives up on after protocolTimeout ("Network.enable timed
+    // out", "Page.addScriptToEvaluateOnNewDocument timed out"). Chrome itself is
+    // fine, so check that it still answers before doing anything drastic. Only
+    // a Chrome that no longer responds is killed, so in-flight awaits reject
+    // and scrapeCourseResilient relaunches and resumes the course.
+    let checkingBrowser = false;
+    const onUnhandled = async (reason) => {
       if (!isBrowserFault(reason)) {
         process.removeListener("unhandledRejection", onUnhandled);
         throw reason; // not ours: restore Node's default crash behaviour
       }
-      helpers.print(
-        "WARNING",
-        "BROWSER",
-        "Chrome stopped responding; restarting it and resuming",
-        0,
-        reason.message
-      );
+      const current = browser;
+      if (!current || checkingBrowser || helpers.browserGone(current)) return;
+      checkingBrowser = true;
       try {
-        browser?.process()?.kill("SIGKILL");
-      } catch {}
+        if (await helpers.browserResponds(current)) {
+          report.recordDiagnostic({
+            kind: "ignored-protocol-timeout",
+            message: (reason && reason.message) || String(reason),
+          });
+          return;
+        }
+        helpers.print(
+          "WARNING",
+          "BROWSER",
+          "Chrome stopped responding; restarting it and resuming",
+          0,
+          reason.message
+        );
+        try {
+          current.process()?.kill("SIGKILL");
+        } catch {}
+      } finally {
+        checkingBrowser = false;
+      }
     };
     process.on("unhandledRejection", onUnhandled);
     removeUnhandledListener = () =>
@@ -622,8 +697,12 @@ export async function runScrape(url, options, hooks = {}) {
     const scrapeCourseResilient = async (...args) => {
       const maxAttempts = 3;
       for (let attempt = 1; ; attempt++) {
+        // If Chrome dies, end this attempt at once. Some Puppeteer calls are
+        // only given up on after protocolTimeout (5 min) when Chrome goes away,
+        // which looked like a hang.
+        const gone = helpers.untilDisconnected(browser);
         try {
-          return await scrapeCourse(browser, ...args);
+          return await Promise.race([scrapeCourse(browser, ...args), gone.promise]);
         } catch (e) {
           if (attempt >= maxAttempts || !isBrowserFault(e)) throw e;
           helpers.print(
@@ -633,13 +712,19 @@ export async function runScrape(url, options, hooks = {}) {
             0,
             e.message
           );
-          await browser.close().catch(() => {});
-          browser = await launchBrowser();
+          await helpers.closeBrowser(browser);
+          browser = await waits.track("Chrome to restart", 0, () =>
+            launchBrowser({ protocolTimeout: helpers.protocolTimeoutMs })
+          );
+        } finally {
+          gone.cancel();
         }
       }
     };
 
     let courseCount = 0;
+    let courseTotal = 1;
+    const failedCourses = [];
     if (courseId) {
       // single course -> its own self-contained folder inside the main folder,
       // named after the course (falling back to the id if the name is unavailable).
@@ -688,8 +773,10 @@ export async function runScrape(url, options, hooks = {}) {
           0
         );
         onProgress({ type: "start", mode: "all", total: 0 });
+        courseTotal = 0;
       } else {
         helpers.print("NOTE", "COURSES", `Found ${courses.length} course(s).`, 0);
+        courseTotal = courses.length;
         onProgress({ type: "start", mode: "all", total: courses.length });
         let index = 0;
         const usedFolders = new Set();
@@ -709,13 +796,14 @@ export async function runScrape(url, options, hooks = {}) {
             courseCount++;
           } catch (e) {
             helpers.print("ERROR", "COURSE", `Could not scrape ${c.name} (${c.id})`, 0, e);
+            failedCourses.push({ id: c.id, name: c.name, error: (e && e.message) || String(e) });
           }
           onProgress({ type: "course-end", index, total: courses.length });
         }
       }
     }
 
-    await browser.close();
+    await helpers.closeBrowser(browser);
     browser = null;
 
     // A dry-run's whole output is the accessibility report; write it and skip the
@@ -723,7 +811,8 @@ export async function runScrape(url, options, hooks = {}) {
     // to organize).
     if (options.dryRun) {
       writeDryRunReport(dir);
-      const summary = { outputDir: dir, courseCount, single: !!courseId, dryRun: true };
+      const summary = { outputDir: dir, courseCount, courseTotal, failedCourses, single: !!courseId, dryRun: true };
+      if (failedCourses.length) helpers.print("WARNING", "COURSES", describeCourseSummary(summary), 0);
       onProgress({ type: "done", summary });
       emit("*** DONE (dry run — nothing downloaded) ***");
       return summary;
@@ -781,13 +870,15 @@ export async function runScrape(url, options, hooks = {}) {
       }
     }
 
-    const summary = { outputDir: dir, courseCount, single: !!courseId };
+    const summary = { outputDir: dir, courseCount, courseTotal, failedCourses, single: !!courseId };
+    if (failedCourses.length) helpers.print("WARNING", "COURSES", describeCourseSummary(summary), 0);
     onProgress({ type: "done", summary });
     emit("*** DONE ***");
     return summary;
   } finally {
+    clearInterval(heartbeat);
     removeUnhandledListener();
-    if (browser) await browser.close().catch(() => {});
+    if (browser) await helpers.closeBrowser(browser);
     // Always flush tracked errors to errors.csv (best-effort). This runs even
     // when the scrape threw, so a failed run still leaves a record to resolve.
     writeErrorsReport(dir);
@@ -798,6 +889,7 @@ export async function runScrape(url, options, hooks = {}) {
     helpers.setProgressSink(prevProgressSink);
     helpers.setDryRun(prevDryRun);
     helpers.setFresh(prevFresh);
+    helpers.setCookieJar(prevCookieJar);
     manifest.setForce(prevForce);
     manifest.setPrune(prevPrune);
   }
@@ -822,6 +914,15 @@ function fmtBytes(n) {
  * prints throttled milestone lines for videos so a large download isn't silent.
  */
 function makeProgressSink(hooks, onProgress) {
+  const sink = makeProgressSinkInner(hooks, onProgress);
+  // A download or transcription that's moving isn't a stall.
+  return (evt) => {
+    waits.noteActivity();
+    return sink(evt);
+  };
+}
+
+function makeProgressSinkInner(hooks, onProgress) {
   if (hooks.onProgress) {
     return (evt) => onProgress({ type: "download", ...evt });
   }

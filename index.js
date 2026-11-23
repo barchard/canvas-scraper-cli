@@ -7,6 +7,7 @@ import { runScrape } from "./core/scrape.js";
 import { retranscribeAll } from "./core/transcribe.js";
 import { runLogin } from "./core/login.js";
 import { runImport } from "./core/import.js";
+import { importCookies } from "./core/cookieImport.js";
 import { renderTui } from "./tui/app.js";
 import { ensureChrome } from "./core/chrome.js";
 
@@ -213,10 +214,18 @@ program
   )
   .option("-c, --cookies <path>", "path to write the cookies file", "cookies.json")
   .option("--login-mode <mode>", "cookie capture strategy (fresh)", "fresh")
+  .option(
+    "--site <sites>",
+    "sign in to linked publisher site(s) instead of Canvas, e.g. economist.com (comma-separated)"
+  )
   .action(async (url, opts) => {
     try {
       // Every flow drives a real Chrome; fail early with install help if absent.
       ensureChrome();
+      if (opts.site) {
+        await runLogin(url, { cookies: opts.cookies, sites: opts.site });
+        return;
+      }
       if (!url) {
         const { loginUrl } = await inquirer.prompt([
           {
@@ -234,6 +243,36 @@ program
       await runLogin(url, { cookies: opts.cookies, loginMode: opts.loginMode });
     } catch (e) {
       helpers.print("ERROR", "LOGIN", e.message || String(e), 0);
+      process.exit(1);
+    }
+  });
+
+// `cookies import` subcommand: add a publisher's cookies (e.g. The Economist)
+// to the cookie jar from a browser export file or straight from Firefox.
+const cookiesCmd = program
+  .command("cookies")
+  .description("manage the cookies file (import publisher-site cookies)");
+cookiesCmd
+  .command("import [file]")
+  .description(
+    "import cookies for linked publisher site(s) from a browser export file (JSON or cookies.txt) or --browser firefox"
+  )
+  .requiredOption("--site <sites>", "site(s) to import, e.g. economist.com (comma-separated)")
+  .option("--browser <name>", "read straight from an installed browser instead of a file (firefox)")
+  .option("--profile <name>", "browser profile name or folder (default: the browser's default profile)")
+  .option("--jar <path>", "cookies file to merge into (default: the -c path, or cookies.json)")
+  .action(async (file, opts, cmd) => {
+    try {
+      const merged = cmd.optsWithGlobals();
+      await importCookies({
+        file,
+        browser: merged.browser,
+        profile: merged.profile,
+        sites: merged.site,
+        cookies: merged.jar || merged.cookies || "cookies.json",
+      });
+    } catch (e) {
+      helpers.print("ERROR", "COOKIES", e.message || String(e), 0);
       process.exit(1);
     }
   });

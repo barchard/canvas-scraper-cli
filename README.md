@@ -82,6 +82,34 @@ If you're exporting cookies with an extension instead, add the Panopto cookies t
 
 If the Panopto cookies are missing or expired, those video downloads are skipped with a warning and the rest of the scrape continues.
 
+### Cookies for news and publisher sites (The Economist, NYT, …)
+
+Courses often link to articles on subscription sites. If you have your own subscription, the scraper can use your session so those articles are saved in full instead of as a "subscribe" teaser. These cookies go into the same cookies file as everything else. Adding them never removes your Canvas or Panopto cookies, and logging in to Canvas again never removes them either.
+
+Pick whichever fits how you browse. All three work on macOS, Windows and Linux and need no special system permissions:
+
+```bash
+# 1. Any browser (including Safari): sign in once in a Chrome window the scraper opens
+canvas-scraper login --site economist.com
+
+# 2. Any browser: import a cookie export (JSON or cookies.txt) made with a browser extension
+canvas-scraper cookies import ~/Downloads/cookies.txt --site economist.com
+
+# 3. Firefox: read the cookies straight from your Firefox profile
+canvas-scraper cookies import --browser firefox --site economist.com
+```
+
+- `--site` takes one or more sites, comma-separated (`--site economist.com,nytimes.com`). Only those sites' cookies are saved, even if an export holds your whole browser.
+- `--profile <name>` picks a non-default Firefox profile. `--jar <path>` (or `-c`) picks a cookies file other than `cookies.json`.
+- Safari and Chrome cookies aren't read directly: Safari's store needs Full Disk Access, and Chrome encrypts its cookies. Use option 1 or 2 for those browsers.
+- If an article is still paywalled, `report-skipped.csv` says why: **needs login** (no cookies saved for that site) or **session expired** (cookies saved but they didn't unlock it). Both include the command to fix it.
+
+**Sites that block automated browsers.** Some publishers (The Economist among them) refuse any browser driven by software and show a page like "Access is temporarily restricted" / "unusual activity". The scraper does not try to get around this. Instead:
+
+- `login --site` spots the block, says so, saves nothing for that site, and points you to option 2 (a cookie export from your own browser).
+- During a scrape (and `--dry-run`), a blocked article prints a `[WARNING] BLOCKED` line. It is listed in `report-skipped.csv` / `dry-run-report.csv` with a reason starting `bot-blocked:`, and a `bot-wall` entry with what the scraper saw goes into `download-diagnostics.jsonl`. Imported cookies may not help for these sites. Open the article in your own browser, save it as a PDF, and add it with [`canvas-scraper import`](#manual-import-import).
+- Once a site has blocked the scraper, its other links (including its subdomains) are skipped for the rest of the run. Each one prints `[NOTE] SKIP` and gets its own `bot-blocked:` row in the report naming the link that was blocked first. That way every article you need to save by hand is still listed, without loading each one only to hit the same block. A new run tries the site again.
+
 ### Using Pre-Compiled Release
 
 First, download the latest version from the [Releases](https://github.com/xxmistacruzxx/canvas-scraper/releases) page and extract the ZIP file. Inside the folder, you'll find three (3) different executables, with each being for a different operating system.
@@ -146,7 +174,8 @@ Options:
   -h, --help               display help for command
 
 Commands:
-  login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started")
+  login [options] [url]    open a browser to log in and save your Canvas (and Panopto) cookies (see "Getting Started"); --site <sites> signs in to publisher sites instead
+  cookies import [file]    import publisher-site cookies from an export file or --browser firefox (see "Cookies for news and publisher sites")
 ```
 
 Use any combination of the `a`, `m`, `q`, `v`, and `s` flags to choose what to scrape. If none are provided, all of them are scraped. (`-t`, `--dry-run`, `--report`, `--wiki`, `--octarine`, `--fresh`, `--force`, and `--prune` are separate modifiers — they are **not** included in "scrape all".)
@@ -216,6 +245,36 @@ wipes the course everywhere (canonical **and** any reorganized copy) for a clean
 slate.
 
 Point the scraper at a bare `https://<school_domain>` to work across your courses. By default every course is scraped; pass `--courses 123,456` to limit the run to specific course ids. In the interactive terminal UI you don't need the ids — the Scrape action lists your courses as a checklist where you can toggle individual courses with **Space** or use the **All courses** row to select/de-select every course at once (all start selected).
+
+### Timeouts and waiting
+
+When the scraper is waiting on something, it shows a running timer instead of going quiet. The terminal UI shows a line such as `⏳ Waiting for www.example.com to load — 0:12 (gives up at 0:30)`. If nothing new has appeared for a while, it shows `⏳ No new output for 1:05 …` along with the last thing it did. On the plain command line, the same message is printed every 30 seconds while a wait lasts.
+
+Every limit can be changed in `config.json` with a `"timeouts"` object, in **seconds**. Leave out any you don't want to change:
+
+```json
+"timeouts": {
+  "chromeRequest": 300,
+  "openTab": 300,
+  "pageLoad": 60,
+  "articleLoad": 30,
+  "siteResponse": 30,
+  "downloadStall": 60,
+  "chromeCheck": 30
+}
+```
+
+| Setting | What it limits | Default |
+| --- | --- | --- |
+| `chromeRequest` | Any single request to Chrome (rendering a PDF, running a script, …) | 300 |
+| `openTab` | Opening a new Chrome tab | 300 |
+| `pageLoad` | Loading a Canvas page | 60 |
+| `articleLoad` | Loading an outside article before saving it as a PDF | 30 |
+| `siteResponse` | An outside site starting to answer a download | 30 |
+| `downloadStall` | A download that stops sending data | 60 |
+| `chromeCheck` | Checking that Chrome still answers before restarting it | 30 |
+
+Raise `chromeRequest` or `pageLoad` on a slow machine or connection. Lower `articleLoad` or `siteResponse` to move past unresponsive news sites faster. Unknown names and values that aren't positive numbers are ignored, with a warning at the start of the run.
 
 ### Terminal UI (`--tui`)
 
